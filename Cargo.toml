@@ -1,0 +1,18 @@
+[package]
+name = "rimmod"
+version = "0.1.0"
+edition = "2024"
+exclude = ["AGENTS.md", "NOTE.md"]
+
+[dependencies]
+eframe = { version = "0.36.1", features = ["persistence"] }
+egui-notify = { git = "https://github.com/codebykoi/egui-notify", rev = "9430898572a1b610cd685b71a30e8ff48f1896f8" }
+egui_extras = { version = "0.36.1", features = ["file", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+notify = "8.2.0"
+nucleo-matcher = "0.3.1"
+open = "5.4.2"
+quick-xml = { version = "0.42.0", features = ["serialize"] }
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+steamlocate = "2.1"
