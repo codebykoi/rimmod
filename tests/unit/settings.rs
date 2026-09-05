@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::services::settings::Settings;
+
+use super::settings_apply::{persist_settings, prepare_settings};
 use super::*;
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -75,6 +80,7 @@ fn create_valid_settings() -> io::Result<(TestDirectory, Settings)> {
         rimworld_path: Some(rimworld_path),
         workshop_path: Some(workshop_path),
         config_path: Some(config_path),
+        ..Settings::default()
     };
 
     Ok((test_directory, settings))

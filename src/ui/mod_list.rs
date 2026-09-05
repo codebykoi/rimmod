@@ -4,7 +4,7 @@ use eframe::egui::{self, AtomExt};
 use nucleo_matcher::Matcher;
 
 use crate::{
-    models::{ModCollection, ModId, RimworldMod},
+    models::{ModCollection, ModId, ModSource, RimworldMod},
     services::{fuzzy_search::fuzzy_mod_indices, mod_sorter::OrderWarning},
     ui::icons::{INLINE_ICON_SCALE, mod_source_icon, mod_type_icon, warning_icon},
 };
@@ -54,6 +54,9 @@ pub(crate) enum ModListAction {
         mod_ids: Vec<ModId>,
         kind: ModListKind,
         before_mod_id: Option<ModId>,
+    },
+    Delete {
+        mod_ids: Vec<ModId>,
     },
 }
 
@@ -299,17 +302,49 @@ pub(crate) fn show_mod_list(ui: &mut egui::Ui, view: ModListView<'_>) -> Option<
 
                                     ui.separator();
 
-                                    // TODO: Make check for the Git
-                                    ui.add_enabled_ui(false, |ui| {
-                                        ui.button("Git: Update").on_disabled_hover_ui(|ui| {
-                                            ui.style_mut().interaction.selectable_labels = true;
-                                            ui.label("Requires Git to be installed");
-                                            ui.hyperlink_to(
-                                                "Download Git",
-                                                "https://git-scm.com/install/windows",
-                                            );
-                                        });
+                                    let can_delete = dragged_mods.mod_ids.iter().all(|&mod_id| {
+                                        mods.get(mod_id).is_some_and(|rimworld_mod| {
+                                            !matches!(rimworld_mod.source, ModSource::Official)
+                                        })
                                     });
+                                    let delete_label = match dragged_mods.mod_ids.len() {
+                                        1 => "Delete".to_owned(),
+                                        count => format!("Delete {count} mods"),
+                                    };
+                                    let delete_button = egui::Button::new(
+                                        egui::RichText::new(delete_label)
+                                            .color(ui.visuals().error_fg_color),
+                                    );
+
+                                    if ui.add_enabled(can_delete, delete_button).clicked() {
+                                        requested_action = Some(ModListAction::Delete {
+                                            mod_ids: dragged_mods.mod_ids.clone(),
+                                        });
+                                        ui.close();
+                                    }
+
+                                    if !can_delete {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Official RimWorld content cannot be deleted",
+                                            )
+                                            .weak(),
+                                        );
+                                    }
+
+                                    // ui.separator();
+
+                                    // TODO: Make check for the Git
+                                    // ui.add_enabled_ui(false, |ui| {
+                                    //     ui.button("Git: Update").on_disabled_hover_ui(|ui| {
+                                    //         ui.style_mut().interaction.selectable_labels = true;
+                                    //         ui.label("Requires Git to be installed");
+                                    //         ui.hyperlink_to(
+                                    //             "Download Git",
+                                    //             "https://git-scm.com/install/windows",
+                                    //         );
+                                    //     });
+                                    // });
                                 });
 
                                 response.dnd_set_drag_payload(dragged_mods.clone());

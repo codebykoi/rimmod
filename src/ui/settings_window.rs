@@ -62,6 +62,59 @@ fn show_path_setting(
     requested_open
 }
 
+fn show_file_setting(
+    ui: &mut egui::Ui,
+    title: &str,
+    path: &mut String,
+    error_text: Option<&str>,
+) -> Option<OpenTarget> {
+    let mut requested_open = None;
+
+    ui.group(|ui| {
+        egui::containers::Sides::new().height(24.0).show(
+            ui,
+            |ui| {
+                ui.label(egui::RichText::new(title).strong());
+            },
+            |ui| {
+                if ui.button("Clear...").clicked() {
+                    path.clear();
+                }
+
+                if ui.button("Choose...").clicked() {
+                    let mut dialog = rfd::FileDialog::new().set_title(format!("Choose {title}"));
+
+                    if !path.trim().is_empty() {
+                        dialog = dialog.set_directory(path.as_str());
+                    }
+
+                    if let Some(selected_file) = dialog.pick_file() {
+                        *path = selected_file.to_string_lossy().into_owned();
+                    }
+                }
+
+                let parent = PathBuf::from(path.trim()).parent().map(PathBuf::from);
+
+                if ui
+                    .add_enabled(parent.is_some(), egui::Button::new("Open folder..."))
+                    .clicked()
+                    && let Some(parent) = parent
+                {
+                    requested_open = Some(OpenTarget::Folder(parent));
+                }
+            },
+        );
+
+        ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY));
+
+        if let Some(error_text) = error_text {
+            ui.colored_label(ui.visuals().error_fg_color, error_text);
+        }
+    });
+
+    requested_open
+}
+
 pub(crate) fn display_settings(ui: &mut egui::Ui, state: &mut UiState) -> Option<SettingsAction> {
     let mut requested_action = None;
     let mut window_open = state.settings_open;
@@ -115,6 +168,35 @@ pub(crate) fn display_settings(ui: &mut egui::Ui, state: &mut UiState) -> Option
             ) {
                 requested_action = Some(SettingsAction::Open(open_target));
             }
+
+            ui.add_space(10.0);
+
+            if let Some(open_target) = show_file_setting(
+                ui,
+                "SteamCMD executable (optional when available on PATH)",
+                &mut state.steamcmd_path_input,
+                state.settings_errors.steamcmd.as_deref(),
+            ) {
+                requested_action = Some(SettingsAction::Open(open_target));
+            }
+
+            ui.add_space(10.0);
+
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Steam Web API key").strong());
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.steam_web_api_key_input)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.small(
+                    "Required for Workshop catalog searches. Stored in RimMod's local settings.",
+                );
+                ui.hyperlink_to(
+                    "Get a Steam Web API key",
+                    "https://steamcommunity.com/dev/apikey",
+                );
+            });
 
             ui.add_space(10.0);
 

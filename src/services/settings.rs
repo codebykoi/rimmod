@@ -16,6 +16,10 @@ pub(crate) struct Settings {
     pub(crate) workshop_path: Option<PathBuf>,
 
     pub(crate) config_path: Option<PathBuf>,
+
+    pub(crate) steamcmd_path: Option<PathBuf>,
+
+    pub(crate) steam_web_api_key: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -23,6 +27,7 @@ pub(crate) struct SettingsErrors {
     pub(crate) rimworld: Option<String>,
     pub(crate) workshop: Option<String>,
     pub(crate) config: Option<String>,
+    pub(crate) steamcmd: Option<String>,
     pub(crate) general: Option<String>,
 }
 
@@ -31,6 +36,7 @@ impl SettingsErrors {
         self.rimworld.is_some()
             || self.workshop.is_some()
             || self.config.is_some()
+            || self.steamcmd.is_some()
             || self.general.is_some()
     }
 }
@@ -139,6 +145,10 @@ impl Settings {
         if self.config_path.is_none() {
             self.config_path = discovered.config_path;
         }
+
+        if self.steamcmd_path.is_none() {
+            self.steamcmd_path = discovered.steamcmd_path;
+        }
     }
 
     pub(crate) fn validate_paths(&self) -> SettingsErrors {
@@ -189,6 +199,15 @@ impl Settings {
             Some(_) => {}
         }
 
+        if let Some(path) = self.steamcmd_path()
+            && !path.is_file()
+        {
+            errors.steamcmd = Some(format!(
+                "The SteamCMD executable does not exist or is not accessible: {}",
+                path.display()
+            ));
+        }
+
         errors
     }
 
@@ -210,5 +229,14 @@ impl Settings {
 
     pub(crate) fn config_path(&self) -> Option<&Path> {
         self.config_path.as_deref()
+    }
+
+    pub(crate) fn steamcmd_path(&self) -> Option<&Path> {
+        self.steamcmd_path.as_deref()
+    }
+
+    pub(crate) fn steam_web_api_key(&self) -> Option<&str> {
+        let key = self.steam_web_api_key.trim();
+        (!key.is_empty()).then_some(key)
     }
 }

@@ -6,6 +6,7 @@ pub(crate) mod mod_info;
 pub(crate) mod mod_list;
 pub(crate) mod settings_window;
 pub(crate) mod top_panel;
+pub(crate) mod workshop;
 
 pub(crate) enum OpenTarget {
     Folder(PathBuf),

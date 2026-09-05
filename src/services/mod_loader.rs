@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -367,9 +368,29 @@ pub(crate) fn load_mods(
     mods.append(&mut local.mods);
     warnings.append(&mut local.warnings);
 
-    match settings.workshop_path() {
-        Some(workshop_path) => match load_mods_from(workshop_path, ModRoot::SteamWorkshop) {
+    let steamcmd_workshop_path =
+        crate::services::workshop::steamcmd_workshop_path(settings.steamcmd_path());
+    let workshop_paths = [settings.workshop_path(), steamcmd_workshop_path.as_deref()];
+    let mut seen_workshop_paths = HashSet::new();
+    let mut loaded_workshop_ids = HashSet::new();
+    let mut has_workshop_path = false;
+
+    for workshop_path in workshop_paths.into_iter().flatten() {
+        if !seen_workshop_paths.insert(workshop_path.to_path_buf()) {
+            continue;
+        }
+
+        has_workshop_path = true;
+
+        match load_mods_from(workshop_path, ModRoot::SteamWorkshop) {
             Ok(mut workshop) => {
+                workshop.mods.retain(|rimworld_mod| {
+                    let ModSource::SteamWorkshop { workshop_id } = &rimworld_mod.source else {
+                        return true;
+                    };
+
+                    loaded_workshop_ids.insert(*workshop_id)
+                });
                 mods.append(&mut workshop.mods);
                 warnings.append(&mut workshop.warnings);
             }
@@ -377,11 +398,14 @@ pub(crate) fn load_mods(
                 Some(workshop_path.to_path_buf()),
                 error,
             )),
-        },
-        None => warnings.push(ModLoadWarning::unavailable_directory(
+        }
+    }
+
+    if !has_workshop_path {
+        warnings.push(ModLoadWarning::unavailable_directory(
             None,
             "Steam Workshop directory is not configured; Workshop mods were not loaded",
-        )),
+        ));
     }
 
     if let Err(error) = apply_no_version_warning_support(&mut mods, game_version) {

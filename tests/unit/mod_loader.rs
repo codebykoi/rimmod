@@ -207,6 +207,7 @@ fn missing_workshop_directory_is_a_non_fatal_warning() -> io::Result<()> {
         rimworld_path: Some(rimworld_path),
         workshop_path: Some(missing_workshop_path.clone()),
         config_path: Some(config_path),
+        ..Settings::default()
     };
 
     let report = load_mods(&settings, None)?;
@@ -218,6 +219,64 @@ fn missing_workshop_directory_is_a_non_fatal_warning() -> io::Result<()> {
         report.warnings[0].path.as_deref(),
         Some(missing_workshop_path.as_path())
     );
+
+    Ok(())
+}
+
+#[test]
+fn configured_and_steamcmd_workshop_folders_are_loaded_without_duplicate_ids() -> io::Result<()> {
+    let test_directory = TestDirectory::new()?;
+    let rimworld_path = test_directory.path.join("RimWorld");
+    let config_path = test_directory.path.join("Config");
+    let workshop_path = test_directory.path.join("SteamWorkshop");
+    let steamcmd_root = test_directory.path.join("SteamCmd");
+    let steamcmd_path = steamcmd_root.join("steamcmd-test");
+    let steamcmd_workshop_path = steamcmd_root
+        .join("steamapps")
+        .join("workshop")
+        .join("content")
+        .join("294100");
+
+    fs::create_dir_all(rimworld_path.join("Data"))?;
+    fs::create_dir_all(rimworld_path.join("Mods"))?;
+    fs::create_dir_all(&config_path)?;
+    fs::create_dir_all(&steamcmd_root)?;
+    fs::write(&steamcmd_path, "test executable")?;
+    fs::write(
+        config_path.join("ModsConfig.xml"),
+        "<ModsConfigData><activeMods></activeMods></ModsConfigData>",
+    )?;
+
+    write_about_xml(
+        &workshop_path.join("123"),
+        "<ModMetaData><name>Primary</name><packageId>example.primary</packageId></ModMetaData>",
+    )?;
+    write_about_xml(
+        &steamcmd_workshop_path.join("123"),
+        "<ModMetaData><name>Duplicate</name><packageId>example.duplicate</packageId></ModMetaData>",
+    )?;
+    write_about_xml(
+        &steamcmd_workshop_path.join("456"),
+        "<ModMetaData><name>SteamCMD</name><packageId>example.steamcmd</packageId></ModMetaData>",
+    )?;
+
+    let settings = Settings {
+        rimworld_path: Some(rimworld_path),
+        workshop_path: Some(workshop_path),
+        steamcmd_path: Some(steamcmd_path),
+        config_path: Some(config_path),
+        ..Settings::default()
+    };
+
+    let report = load_mods(&settings, None)?;
+    let package_ids = report
+        .mods
+        .all
+        .iter()
+        .map(|rimworld_mod| rimworld_mod.package_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(package_ids, ["example.primary", "example.steamcmd"]);
 
     Ok(())
 }
