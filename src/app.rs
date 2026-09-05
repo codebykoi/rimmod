@@ -17,7 +17,7 @@ use crate::services::{load_order, mod_sorter};
 use crate::ui::mod_info::show_mod_info;
 use crate::ui::mod_list::{ModListKind, ModListView, show_mod_list};
 use crate::ui::settings_window::{SettingsAction, display_settings};
-use crate::ui::workshop::{WorkshopAction, WorkshopView, show_workshop};
+use crate::ui::workshop::{CoveredModsState, WorkshopAction, WorkshopView, show_workshop};
 use crate::ui::{OpenTarget, bottom_panel, top_panel};
 
 mod deletion;
@@ -31,7 +31,7 @@ mod workshop_ctrl;
 use self::deletion::PendingModDeletion;
 use self::history::LoadOrderSnapshot;
 use self::settings_apply::{path_from_input, path_to_input, persist_settings};
-use self::workshop_ctrl::WorkshopState;
+use self::workshop_ctrl::{CoveredModsStatus, WorkshopState};
 
 const SETTINGS_STORAGE_KEY: &str = "rimmod_settings";
 
@@ -407,6 +407,7 @@ impl eframe::App for App {
                                 kind: ModListKind::Disabled,
                                 mods: &self.mods,
                                 mod_ids: self.mods.disabled_ids(),
+                                game_version: self.game_version.as_deref(),
                                 order_warnings,
                                 search_string: &mut self.state.search_strings.disabled_mods,
                                 matcher: &mut self.state.fuzzy_matcher,
@@ -422,6 +423,7 @@ impl eframe::App for App {
                                 kind: ModListKind::Enabled,
                                 mods: &self.mods,
                                 mod_ids: self.mods.enabled_ids(),
+                                game_version: self.game_version.as_deref(),
                                 order_warnings,
                                 search_string: &mut self.state.search_strings.active_mods,
                                 matcher: &mut self.state.fuzzy_matcher,
@@ -441,6 +443,20 @@ impl eframe::App for App {
                     });
                 }
                 AppTab::Workshop => {
+                    self.ensure_covered_mods(ui.ctx());
+
+                    // Borrow only the coverage field so the view can still
+                    // mutably borrow the other WorkshopState fields.
+                    let covered_mods_state = match &self.workshop.covered_mods {
+                        CoveredModsStatus::Ready(covered_mods) => {
+                            CoveredModsState::Ready(covered_mods)
+                        }
+                        CoveredModsStatus::Failed(error) => CoveredModsState::Failed(error.clone()),
+                        CoveredModsStatus::NotRequested | CoveredModsStatus::Loading(_) => {
+                            CoveredModsState::Loading
+                        }
+                    };
+
                     workshop_action = show_workshop(
                         ui,
                         WorkshopView {
@@ -450,10 +466,14 @@ impl eframe::App for App {
                             total: self.workshop.total,
                             items: &self.workshop.items,
                             load_status: &self.workshop.load_status,
-                            installing_item: self.workshop.installing_item,
+                            installing_items: &self.workshop.installing_items,
+                            selected_items: &self.workshop.selected_items,
                             workshop_path: self.settings.workshop_path(),
                             steamcmd_workshop_path: steamcmd_workshop_path.as_deref(),
                             api_key_configured: self.settings.steam_web_api_key().is_some(),
+                            mods: &self.mods,
+                            game_version: self.game_version.as_deref(),
+                            covered_mods_state,
                         },
                     );
                 }
@@ -467,11 +487,18 @@ impl eframe::App for App {
         match workshop_action {
             Some(WorkshopAction::Search) => self.start_workshop_query(1, ui.ctx()),
             Some(WorkshopAction::GoToPage(page)) => self.start_workshop_query(page, ui.ctx()),
-            Some(WorkshopAction::Install(published_file_id)) => {
-                self.start_workshop_install(published_file_id, ui.ctx());
+            Some(WorkshopAction::Install(published_file_ids)) => {
+                self.start_workshop_install(published_file_ids, ui.ctx());
             }
+            Some(WorkshopAction::ToggleSelect(published_file_id)) => {
+                if !self.workshop.selected_items.remove(&published_file_id) {
+                    self.workshop.selected_items.insert(published_file_id);
+                }
+            }
+            Some(WorkshopAction::ClearSelection) => self.workshop.selected_items.clear(),
             Some(WorkshopAction::Open(target)) => self.open_target(target),
             Some(WorkshopAction::OpenSettings) => self.open_settings(),
+            Some(WorkshopAction::RetryCoveredMods) => self.retry_covered_mods(ui.ctx()),
             None => {}
         }
 

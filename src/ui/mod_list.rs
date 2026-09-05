@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 
-use eframe::egui::{self, AtomExt};
+use eframe::egui::{self, Atom, AtomExt, Atoms, RichText};
 use nucleo_matcher::Matcher;
 
 use crate::{
-    models::{ModCollection, ModId, ModSource, RimworldMod},
+    models::{
+        ModCollection, ModId, ModSource, RimworldMod, VersionSupport, highest_supported_version,
+        major_minor_version_text, version_support,
+    },
     services::{fuzzy_search::fuzzy_mod_indices, mod_sorter::OrderWarning},
-    ui::icons::{INLINE_ICON_SCALE, mod_source_icon, mod_type_icon, warning_icon},
+    ui::icons::{
+        INLINE_ICON_SCALE, mod_source_icon, mod_type_icon, no_version_warning_icon, warning_icon,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,10 +144,58 @@ fn order_warning_text(warning: &OrderWarning, all_mods: &[RimworldMod]) -> Strin
     lines.join("\n")
 }
 
+#[derive(Debug, PartialEq)]
+struct VersionBadge {
+    text: String,
+    color: egui::Color32,
+    community_report: bool,
+    hover: String,
+}
+fn version_badge(rimworld_mod: &RimworldMod, game_version: Option<&str>) -> Option<VersionBadge> {
+    let game_version = game_version?;
+    let game_version_text = major_minor_version_text(game_version)?;
+
+    match version_support(
+        &rimworld_mod.supported_versions,
+        &rimworld_mod.community_supported_versions,
+        game_version,
+    ) {
+        VersionSupport::Official => Some(VersionBadge {
+            text: game_version_text.clone(),
+            color: egui::Color32::LIGHT_GREEN,
+            community_report: false,
+            hover: format!("Supports the installed RimWorld version ({game_version_text})"),
+        }),
+        VersionSupport::Community => Some(VersionBadge {
+            text: game_version_text.clone(),
+            color: egui::Color32::LIGHT_YELLOW,
+            community_report: true,
+            hover: format!(
+                "Not listed for RimWorld {game_version_text}, but a No Version Warning \
+                 community report says it works"
+            ),
+        }),
+        VersionSupport::Unsupported => {
+            let newest_supported = highest_supported_version(&rimworld_mod.supported_versions)?;
+
+            Some(VersionBadge {
+                text: newest_supported.to_owned(),
+                color: egui::Color32::GRAY,
+                community_report: false,
+                hover: format!(
+                    "Does not support RimWorld {game_version_text}; the newest supported \
+                     version is {newest_supported}"
+                ),
+            })
+        }
+    }
+}
+
 pub(crate) struct ModListView<'a> {
     pub(crate) kind: ModListKind,
     pub(crate) mods: &'a ModCollection,
     pub(crate) mod_ids: &'a [ModId],
+    pub(crate) game_version: Option<&'a str>,
     pub(crate) order_warnings: &'a HashMap<ModId, OrderWarning>,
     pub(crate) search_string: &'a mut String,
     pub(crate) matcher: &'a mut Matcher,
@@ -156,6 +209,7 @@ pub(crate) fn show_mod_list(ui: &mut egui::Ui, view: ModListView<'_>) -> Option<
         kind,
         mods,
         mod_ids,
+        game_version,
         order_warnings,
         search_string,
         matcher,
@@ -252,17 +306,47 @@ pub(crate) fn show_mod_list(ui: &mut egui::Ui, view: ModListView<'_>) -> Option<
                                     (source_icon, type_icon, &rimworld_mod.name),
                                 );
 
+                                let version_badge = version_badge(rimworld_mod, game_version);
+
+                                let mut right_side = Vec::<Atom<'static>>::new();
+
                                 if order_warning.is_some() {
                                     let warning_icon = warning_icon().atom_max_height(icon_height);
-                                    button = button.right_text(warning_icon);
+                                    right_side.push(warning_icon);
+                                }
+
+                                if let Some(badge) = &version_badge {
+                                    if badge.community_report {
+                                        let community_icon =
+                                            no_version_warning_icon().atom_max_height(icon_height);
+                                        right_side.push(community_icon);
+                                    }
+
+                                    let version_text =
+                                        RichText::new(&badge.text).small().color(badge.color);
+                                    right_side.push(version_text.into());
+                                }
+
+                                if !right_side.is_empty() {
+                                    button = button.right_text(Atoms::from(right_side));
                                 }
 
                                 let response = ui.add(button.sense(egui::Sense::click_and_drag()));
 
-                                let response = match order_warning {
-                                    Some(warning) => response
-                                        .on_hover_text(order_warning_text(warning, &mods.all)),
-                                    None => response,
+                                let mut hover_lines = Vec::new();
+
+                                if let Some(warning) = order_warning {
+                                    hover_lines.push(order_warning_text(warning, &mods.all));
+                                }
+
+                                if let Some(badge) = &version_badge {
+                                    hover_lines.push(badge.hover.clone());
+                                }
+
+                                let response = if hover_lines.is_empty() {
+                                    response
+                                } else {
+                                    response.on_hover_text(hover_lines.join("\n"))
                                 };
 
                                 response.context_menu(|ui| {
@@ -274,6 +358,13 @@ pub(crate) fn show_mod_list(ui: &mut egui::Ui, view: ModListView<'_>) -> Option<
                                     } else {
                                         ui.strong(&rimworld_mod.name);
                                         ui.label(rimworld_mod.package_id.as_str());
+
+                                        if !rimworld_mod.supported_versions.is_empty() {
+                                            ui.label(format!(
+                                                "Supported versions: {}",
+                                                rimworld_mod.supported_versions.join(", ")
+                                            ));
+                                        }
                                     }
 
                                     ui.separator();
@@ -455,6 +546,8 @@ pub(crate) fn show_mod_list(ui: &mut egui::Ui, view: ModListView<'_>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{ModType, PackageId};
+    use std::path::PathBuf;
 
     #[test]
     fn selection_range_uses_visible_list_order_in_both_directions() {
@@ -485,5 +578,73 @@ mod tests {
             ),
             None
         );
+    }
+
+    fn badge_mod(supported: &[&str], community: &[&str]) -> RimworldMod {
+        RimworldMod {
+            name: "Test mod".to_owned(),
+            package_id: PackageId::new("test.mod").expect("valid package ID"),
+            description: String::new(),
+            supported_versions: supported
+                .iter()
+                .map(|version| (*version).to_owned())
+                .collect(),
+            community_supported_versions: community
+                .iter()
+                .map(|version| (*version).to_owned())
+                .collect(),
+            loader_after: Vec::new(),
+            loader_before: Vec::new(),
+            folder: PathBuf::new(),
+            source: ModSource::Local,
+            mod_type: ModType::Xml,
+        }
+    }
+
+    #[test]
+    fn official_support_shows_the_game_version() {
+        let rimworld_mod = badge_mod(&["1.4", "1.5", "1.6"], &[]);
+
+        let badge = version_badge(&rimworld_mod, Some("1.6.4211")).expect("badge");
+
+        assert_eq!(badge.text, "1.6");
+        assert!(!badge.community_report);
+        assert!(badge.hover.contains("Supports"));
+    }
+
+    #[test]
+    fn community_support_shows_the_no_version_warning_report() {
+        let rimworld_mod = badge_mod(&["1.4"], &["1.6"]);
+
+        let badge = version_badge(&rimworld_mod, Some("1.6")).expect("badge");
+
+        assert_eq!(badge.text, "1.6");
+        assert!(badge.community_report);
+        assert!(badge.hover.contains("No Version Warning"));
+    }
+
+    #[test]
+    fn unsupported_mods_show_their_newest_supported_version() {
+        let rimworld_mod = badge_mod(&["1.0", "1.5", "1.4"], &[]);
+
+        let badge = version_badge(&rimworld_mod, Some("1.6")).expect("badge");
+
+        assert_eq!(badge.text, "1.5");
+        assert!(!badge.community_report);
+        assert!(badge.hover.contains("Does not support"));
+    }
+
+    #[test]
+    fn mod_without_listed_versions_gets_no_badge() {
+        let rimworld_mod = badge_mod(&[], &[]);
+
+        assert_eq!(version_badge(&rimworld_mod, Some("1.6")), None);
+    }
+
+    #[test]
+    fn unknown_game_version_gets_no_badge() {
+        let rimworld_mod = badge_mod(&["1.6"], &[]);
+
+        assert_eq!(version_badge(&rimworld_mod, None), None);
     }
 }

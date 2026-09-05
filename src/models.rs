@@ -101,12 +101,56 @@ pub(crate) fn major_minor_version_text(version: &str) -> Option<String> {
     Some(format!("{major}.{minor}"))
 }
 
-fn major_minor_version(version: &str) -> Option<(u32, u32)> {
+pub(crate) fn major_minor_version(version: &str) -> Option<(u32, u32)> {
     let mut parts = version.trim().split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.split_whitespace().next()?.parse().ok()?;
 
     Some((major, minor))
+}
+
+/// How a mod's version data relates to the running game version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VersionSupport {
+    /// Listed in the mod's `supportedVersions`
+    Official,
+
+    /// Not listed, but reported working by the No Version Warning mod
+    Community,
+
+    /// Neither listed nor reported for this game version
+    Unsupported,
+}
+
+pub(crate) fn version_support(
+    supported_versions: &[String],
+    community_supported_versions: &[String],
+    game_version: &str,
+) -> VersionSupport {
+    if supported_versions
+        .iter()
+        .any(|version| versions_are_compatible(version, game_version))
+    {
+        return VersionSupport::Official;
+    }
+
+    if community_supported_versions
+        .iter()
+        .any(|version| versions_are_compatible(version, game_version))
+    {
+        return VersionSupport::Community;
+    }
+
+    VersionSupport::Unsupported
+}
+
+/// Return the newest listed version, compared by major.minor numbers.
+pub(crate) fn highest_supported_version(supported_versions: &[String]) -> Option<&str> {
+    supported_versions
+        .iter()
+        .filter_map(|version| Some((major_minor_version(version)?, version.as_str())))
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, version)| version)
 }
 
 #[derive(Debug)]

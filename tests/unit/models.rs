@@ -139,3 +139,68 @@ fn reordering_multiple_mods_keeps_their_relative_order() {
         ]
     );
 }
+
+fn versions(raw_versions: &[&str]) -> Vec<String> {
+    raw_versions
+        .iter()
+        .map(|version| (*version).to_owned())
+        .collect()
+}
+
+#[test]
+fn version_support_prefers_the_official_list() {
+    let supported_versions = versions(&["1.4", "1.5"]);
+    let community_supported_versions = versions(&["1.5"]);
+
+    assert_eq!(
+        version_support(&supported_versions, &community_supported_versions, "1.5"),
+        VersionSupport::Official
+    );
+    assert_eq!(
+        version_support(&supported_versions, &community_supported_versions, "1.4"),
+        VersionSupport::Official
+    );
+}
+
+#[test]
+fn version_support_falls_back_to_the_community_list() {
+    let supported_versions = versions(&["1.4"]);
+    let community_supported_versions = versions(&["1.5"]);
+
+    assert_eq!(
+        version_support(&supported_versions, &community_supported_versions, "1.5"),
+        VersionSupport::Community
+    );
+}
+
+#[test]
+fn version_support_reports_unlisted_game_versions() {
+    let supported_versions = versions(&["1.4"]);
+    let community_supported_versions = Vec::new();
+
+    assert_eq!(
+        version_support(&supported_versions, &community_supported_versions, "1.6"),
+        VersionSupport::Unsupported
+    );
+}
+
+#[test]
+fn highest_supported_version_compares_major_minor_numerically() {
+    assert_eq!(
+        highest_supported_version(&versions(&["1.0", "1.5", "1.4"])),
+        Some("1.5")
+    );
+    assert_eq!(
+        highest_supported_version(&versions(&["1.9", "1.10"])),
+        Some("1.10")
+    );
+    assert_eq!(
+        highest_supported_version(&versions(&["2.0", "1.10"])),
+        Some("2.0")
+    );
+    assert_eq!(highest_supported_version(&versions(&[])), None);
+    assert_eq!(
+        highest_supported_version(&versions(&["not a version"])),
+        None
+    );
+}

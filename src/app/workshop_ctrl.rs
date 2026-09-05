@@ -1,13 +1,22 @@
-use std::io;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
 
-use crate::services::workshop::{self, WorkshopItem, WorkshopPage, WorkshopSort};
+use crate::services::no_version_warning::{self, CoveredMods};
+use crate::services::workshop::{self, InstallOutcome, WorkshopItem, WorkshopPage, WorkshopSort};
 use crate::ui::workshop::WorkshopLoadStatus;
 
 use super::App;
+
+/// Background fetch state of the No Version Warning community reports.
+pub(super) enum CoveredModsStatus {
+    NotRequested,
+    Loading(Receiver<Result<CoveredMods, String>>),
+    Ready(CoveredMods),
+    Failed(String),
+}
 
 pub(super) struct WorkshopState {
     pub(super) query: String,
@@ -18,8 +27,10 @@ pub(super) struct WorkshopState {
     pub(super) load_status: WorkshopLoadStatus,
     pub(super) pending_page: Option<u32>,
     pub(super) query_receiver: Option<Receiver<Result<WorkshopPage, String>>>,
-    pub(super) installing_item: Option<u64>,
-    pub(super) install_receiver: Option<Receiver<(u64, io::Result<()>)>>,
+    pub(super) selected_items: HashSet<u64>,
+    pub(super) installing_items: Vec<u64>,
+    pub(super) install_receiver: Option<Receiver<Vec<InstallOutcome>>>,
+    pub(super) covered_mods: CoveredModsStatus,
 }
 
 impl Default for WorkshopState {
@@ -33,13 +44,41 @@ impl Default for WorkshopState {
             load_status: WorkshopLoadStatus::default(),
             pending_page: None,
             query_receiver: None,
-            installing_item: None,
+            selected_items: HashSet::new(),
+            installing_items: Vec::new(),
             install_receiver: None,
+            covered_mods: CoveredModsStatus::NotRequested,
         }
     }
 }
 
 impl App {
+    /// Fetch the No Version Warning community reports once per session so
+    /// un-installed Workshop items can show their community compatibility.
+    pub(super) fn ensure_covered_mods(&mut self, context: &egui::Context) {
+        if !matches!(self.workshop.covered_mods, CoveredModsStatus::NotRequested) {
+            return;
+        }
+
+        let context = context.clone();
+        let (sender, receiver) = mpsc::channel();
+
+        self.workshop.covered_mods = CoveredModsStatus::Loading(receiver);
+
+        std::thread::spawn(move || {
+            let result = no_version_warning::fetch_covered_mods();
+            let _ = sender.send(result);
+            context.request_repaint();
+        });
+    }
+
+    pub(super) fn retry_covered_mods(&mut self, context: &egui::Context) {
+        if matches!(self.workshop.covered_mods, CoveredModsStatus::Failed(_)) {
+            self.workshop.covered_mods = CoveredModsStatus::NotRequested;
+            self.ensure_covered_mods(context);
+        }
+    }
+
     pub(super) fn start_workshop_query(&mut self, page: u32, context: &egui::Context) {
         let Some(api_key) = self.settings.steam_web_api_key().map(str::to_owned) else {
             self.workshop.load_status = WorkshopLoadStatus::Error(
@@ -71,10 +110,10 @@ impl App {
 
     pub(super) fn start_workshop_install(
         &mut self,
-        published_file_id: u64,
+        published_file_ids: Vec<u64>,
         context: &egui::Context,
     ) {
-        if self.workshop.installing_item.is_some() {
+        if !self.workshop.installing_items.is_empty() || published_file_ids.is_empty() {
             return;
         }
 
@@ -85,20 +124,56 @@ impl App {
             .unwrap_or_else(workshop::default_steamcmd_path);
         let context = context.clone();
         let (sender, receiver) = mpsc::channel();
+        let installing_items = published_file_ids.clone();
 
-        self.workshop.installing_item = Some(published_file_id);
+        self.workshop.installing_items = installing_items;
         self.workshop.install_receiver = Some(receiver);
-        self.toasts
-            .info(format!("Installing Workshop item {published_file_id}..."));
+        let message = if published_file_ids.len() == 1 {
+            format!("Installing Workshop item {}...", published_file_ids[0])
+        } else {
+            format!("Installing {} Workshop items...", published_file_ids.len())
+        };
+        self.toasts.info(message);
 
         std::thread::spawn(move || {
-            let result = workshop::install_workshop_item(&steamcmd_path, published_file_id);
-            let _ = sender.send((published_file_id, result));
+            let outcomes = workshop::install_workshop_items(&steamcmd_path, &published_file_ids)
+                .unwrap_or_else(|error| {
+                    let message = error.to_string();
+                    published_file_ids
+                        .iter()
+                        .map(|&published_file_id| InstallOutcome {
+                            published_file_id,
+                            error: Some(message.clone()),
+                        })
+                        .collect()
+                });
+            let _ = sender.send(outcomes);
             context.request_repaint();
         });
     }
 
     pub(super) fn poll_workshop_tasks(&mut self, context: &egui::Context) {
+        let covered_result = match &self.workshop.covered_mods {
+            CoveredModsStatus::Loading(receiver) => Some(receiver.try_recv()),
+            _ => None,
+        };
+
+        match covered_result {
+            Some(Ok(Ok(covered_mods))) => {
+                self.workshop.covered_mods = CoveredModsStatus::Ready(covered_mods);
+            }
+            Some(Ok(Err(error))) => {
+                self.workshop.covered_mods = CoveredModsStatus::Failed(error);
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.workshop.covered_mods = CoveredModsStatus::Failed(
+                    "the background worker stopped unexpectedly".to_owned(),
+                );
+            }
+            // The worker is still running; check again next frame.
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+
         let query_result = self
             .workshop
             .query_receiver
@@ -135,38 +210,48 @@ impl App {
             .map(|receiver| receiver.try_recv());
 
         match install_result {
-            Some(Ok((published_file_id, Ok(())))) => {
-                self.workshop.installing_item = None;
+            Some(Ok(outcomes)) => {
+                self.workshop.installing_items = Vec::new();
                 self.workshop.install_receiver = None;
+                for outcome in &outcomes {
+                    self.workshop
+                        .selected_items
+                        .remove(&outcome.published_file_id);
+                }
                 self.reload_mods();
                 self.restart_mod_watcher(context);
 
                 let steamcmd_workshop_path =
                     workshop::steamcmd_workshop_path(self.settings.steamcmd_path());
-                if workshop::is_item_installed(
-                    self.settings.workshop_path(),
-                    steamcmd_workshop_path.as_deref(),
-                    published_file_id,
-                ) {
-                    self.clear_action_error();
-                    self.toasts.success(format!(
-                        "Workshop item {published_file_id} installed and added to the Mods list"
-                    ));
-                } else {
-                    self.toasts.warning(format!(
-                        "SteamCMD finished, but item {published_file_id} was not found in the configured Workshop folder"
-                    ));
+                for outcome in outcomes {
+                    match outcome.error {
+                        Some(error) => self.report_action_error(format!(
+                            "Could not install Workshop item {}: {error}",
+                            outcome.published_file_id
+                        )),
+                        None => {
+                            if workshop::is_item_installed(
+                                self.settings.workshop_path(),
+                                steamcmd_workshop_path.as_deref(),
+                                outcome.published_file_id,
+                            ) {
+                                self.clear_action_error();
+                                self.toasts.success(format!(
+                                    "Workshop item {} installed and added to the Mods list",
+                                    outcome.published_file_id
+                                ));
+                            } else {
+                                self.toasts.warning(format!(
+                                    "SteamCMD finished, but item {} was not found in the configured Workshop folder",
+                                    outcome.published_file_id
+                                ));
+                            }
+                        }
+                    }
                 }
             }
-            Some(Ok((published_file_id, Err(error)))) => {
-                self.workshop.installing_item = None;
-                self.workshop.install_receiver = None;
-                self.report_action_error(format!(
-                    "Could not install Workshop item {published_file_id}: {error}"
-                ));
-            }
             Some(Err(TryRecvError::Disconnected)) => {
-                self.workshop.installing_item = None;
+                self.workshop.installing_items = Vec::new();
                 self.workshop.install_receiver = None;
                 self.report_action_error("The SteamCMD worker stopped unexpectedly");
             }

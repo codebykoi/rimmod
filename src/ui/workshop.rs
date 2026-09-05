@@ -1,9 +1,13 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use eframe::egui;
 
+use crate::models::{ModCollection, ModSource, RimworldMod};
+use crate::services::no_version_warning::CoveredMods;
 use crate::services::workshop::{WorkshopItem, WorkshopSort, is_item_installed};
 use crate::ui::OpenTarget;
+use crate::ui::mod_info::show_supported_versions;
 
 pub(crate) const ITEMS_PER_PAGE: u64 = 30;
 const PREVIEW_SIZE: egui::Vec2 = egui::vec2(144.0, 96.0);
@@ -17,6 +21,22 @@ pub(crate) enum WorkshopLoadStatus {
     Error(String),
 }
 
+/// Display state of the background No Version Warning data fetch.
+pub(crate) enum CoveredModsState<'a> {
+    Loading,
+    Ready(&'a CoveredMods),
+    Failed(String),
+}
+
+impl CoveredModsState<'_> {
+    fn ready_mods(&self) -> Option<&CoveredMods> {
+        match self {
+            Self::Ready(covered_mods) => Some(covered_mods),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) struct WorkshopView<'a> {
     pub(crate) query: &'a mut String,
     pub(crate) sort: &'a mut WorkshopSort,
@@ -24,18 +44,25 @@ pub(crate) struct WorkshopView<'a> {
     pub(crate) total: u64,
     pub(crate) items: &'a [WorkshopItem],
     pub(crate) load_status: &'a WorkshopLoadStatus,
-    pub(crate) installing_item: Option<u64>,
+    pub(crate) installing_items: &'a [u64],
+    pub(crate) selected_items: &'a HashSet<u64>,
     pub(crate) workshop_path: Option<&'a Path>,
     pub(crate) steamcmd_workshop_path: Option<&'a Path>,
     pub(crate) api_key_configured: bool,
+    pub(crate) mods: &'a ModCollection,
+    pub(crate) game_version: Option<&'a str>,
+    pub(crate) covered_mods_state: CoveredModsState<'a>,
 }
 
 pub(crate) enum WorkshopAction {
     Search,
     GoToPage(u32),
-    Install(u64),
+    Install(Vec<u64>),
+    ToggleSelect(u64),
+    ClearSelection,
     Open(OpenTarget),
     OpenSettings,
+    RetryCoveredMods,
 }
 
 pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option<WorkshopAction> {
@@ -67,6 +94,21 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
             ui.add(egui::Spinner::new());
         }
     });
+
+    match &view.covered_mods_state {
+        CoveredModsState::Loading => {
+            ui.small("Loading No Version Warning compatibility data...");
+        }
+        CoveredModsState::Failed(error) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.small(format!("No Version Warning data unavailable: {error}"));
+                if ui.small_button("Retry").clicked() {
+                    action = Some(WorkshopAction::RetryCoveredMods);
+                }
+            });
+        }
+        CoveredModsState::Ready(_) => {}
+    }
 
     ui.add_space(6.0);
 
@@ -115,6 +157,33 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
         }
     });
 
+    if !view.items.is_empty() {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let download_button = ui.add_enabled(
+                !view.selected_items.is_empty() && view.installing_items.is_empty(),
+                egui::Button::new(format!("Download selected ({})", view.selected_items.len())),
+            );
+            if download_button.clicked() {
+                let mut published_file_ids: Vec<u64> =
+                    view.selected_items.iter().copied().collect();
+                published_file_ids.sort_unstable();
+                action = Some(WorkshopAction::Install(published_file_ids));
+            }
+
+            if !view.selected_items.is_empty() && ui.button("Clear selection").clicked() {
+                action = Some(WorkshopAction::ClearSelection);
+            }
+
+            if !view.installing_items.is_empty() {
+                ui.small(format!(
+                    "Downloading {} item(s) with SteamCMD...",
+                    view.installing_items.len()
+                ));
+            }
+        });
+    }
+
     ui.separator();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -124,12 +193,17 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                 view.steamcmd_workshop_path,
                 item.published_file_id,
             );
-            let is_installing = view.installing_item == Some(item.published_file_id);
+            let installed_mod = installed_workshop_mod(view.mods, item.published_file_id);
+            let mut is_selected = view.selected_items.contains(&item.published_file_id);
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
 
                 ui.horizontal(|ui| {
+                    if ui.checkbox(&mut is_selected, "").changed() {
+                        action = Some(WorkshopAction::ToggleSelect(item.published_file_id));
+                    }
+
                     if let Some(preview_url) = item.preview_url.as_deref() {
                         let preview = egui::Image::new(preview_url)
                             .fit_to_exact_size(PREVIEW_SIZE)
@@ -173,31 +247,9 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                 ui.small(format!("Workshop item {}", item.published_file_id));
                             });
 
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let button_text = install_button_text(installed, is_installing);
-
-                                    let mut button = ui.add_enabled(
-                                        view.installing_item.is_none(),
-                                        egui::Button::new(button_text),
-                                    );
-                                    if installed {
-                                        button = button.on_hover_text(
-                                            "Download this item again with SteamCMD",
-                                        );
-                                    }
-
-                                    if button.clicked() {
-                                        action =
-                                            Some(WorkshopAction::Install(item.published_file_id));
-                                    }
-
-                                    if installed {
-                                        ui.colored_label(egui::Color32::LIGHT_GREEN, "Installed");
-                                    }
-                                },
-                            );
+                            if installed {
+                                ui.colored_label(egui::Color32::LIGHT_GREEN, "Installed");
+                            }
                         });
 
                         if !item.description.trim().is_empty() {
@@ -207,6 +259,38 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
 
                         if let Some(subscriptions) = item.subscriptions {
                             ui.small(format!("{subscriptions} subscribers"));
+                        }
+
+                        // Installed mods report their versions through About.xml,
+                        // which also carries No Version Warning community reports.
+                        // Un-installed items fall back to Steam tags plus the
+                        // No Version Warning "covered mods" list.
+                        let (supported_versions, community_versions) = match installed_mod {
+                            Some(rimworld_mod) => (
+                                rimworld_mod.supported_versions.as_slice(),
+                                rimworld_mod.community_supported_versions.as_slice(),
+                            ),
+                            None => {
+                                let covered = view
+                                    .covered_mods_state
+                                    .ready_mods()
+                                    .and_then(|covered_mods| {
+                                        covered_mods.get(&item.published_file_id)
+                                    })
+                                    .map(|versions| versions.as_slice())
+                                    .unwrap_or(&[]);
+
+                                (item.supported_versions.as_slice(), covered)
+                            }
+                        };
+
+                        if !supported_versions.is_empty() || !community_versions.is_empty() {
+                            show_supported_versions(
+                                ui,
+                                supported_versions,
+                                community_versions,
+                                view.game_version,
+                            );
                         }
                     });
                 });
@@ -231,18 +315,21 @@ fn short_description(description: &str) -> String {
     }
 }
 
-fn install_button_text(installed: bool, is_installing: bool) -> &'static str {
-    match (installed, is_installing) {
-        (true, true) => "Reinstalling...",
-        (true, false) => "Reinstall",
-        (false, true) => "Installing...",
-        (false, false) => "Install",
-    }
+fn installed_workshop_mod(mods: &ModCollection, published_file_id: u64) -> Option<&RimworldMod> {
+    mods.all.iter().find(|rimworld_mod| {
+        matches!(
+            rimworld_mod.source,
+            ModSource::SteamWorkshop { workshop_id } if workshop_id == published_file_id
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{install_button_text, short_description};
+    use super::short_description;
+    use super::*;
+    use crate::models::{ModId, ModType, PackageId};
+    use std::path::PathBuf;
 
     #[test]
     fn description_shortening_respects_utf8_characters() {
@@ -253,11 +340,38 @@ mod tests {
         assert!(shortened.ends_with('…'));
     }
 
+    fn workshop_mod(package: &str, workshop_id: u64) -> RimworldMod {
+        RimworldMod {
+            name: package.to_owned(),
+            package_id: PackageId::new(package).expect("valid package ID"),
+            description: String::new(),
+            supported_versions: vec!["1.5".to_owned()],
+            community_supported_versions: Vec::new(),
+            loader_after: Vec::new(),
+            loader_before: Vec::new(),
+            folder: PathBuf::new(),
+            source: ModSource::SteamWorkshop { workshop_id },
+            mod_type: ModType::Xml,
+        }
+    }
+
     #[test]
-    fn installed_items_offer_reinstall_instead_of_update() {
-        assert_eq!(install_button_text(true, false), "Reinstall");
-        assert_eq!(install_button_text(true, true), "Reinstalling...");
-        assert_eq!(install_button_text(false, false), "Install");
-        assert_eq!(install_button_text(false, true), "Installing...");
+    fn installed_mod_lookup_matches_the_workshop_id() {
+        let local = RimworldMod {
+            source: ModSource::Local,
+            ..workshop_mod("example.local", 0)
+        };
+        let workshop = workshop_mod("example.workshop", 1234);
+        let mods = ModCollection::new(
+            vec![local, workshop],
+            vec![ModId::from_index(0), ModId::from_index(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let found = installed_workshop_mod(&mods, 1234).expect("workshop mod");
+        assert_eq!(found.package_id.as_str(), "example.workshop");
+
+        assert!(installed_workshop_mod(&mods, 9999).is_none());
     }
 }

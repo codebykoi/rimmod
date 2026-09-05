@@ -92,7 +92,7 @@ pub(crate) fn show_mod_info(
     requested_open
 }
 
-fn show_supported_versions(
+pub(crate) fn show_supported_versions(
     ui: &mut egui::Ui,
     supported_versions: &[String],
     community_supported_versions: &[String],

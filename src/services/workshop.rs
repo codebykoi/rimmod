@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::models::major_minor_version;
+
 pub(crate) const RIMWORLD_APP_ID: u32 = 294_100;
 const QUERY_FILES_URL: &str = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/";
 
@@ -56,6 +58,8 @@ pub(crate) struct WorkshopItem {
     pub(crate) description: String,
     pub(crate) preview_url: Option<String>,
     pub(crate) subscriptions: Option<u64>,
+    /// Versions the author tagged the item with on the Workshop
+    pub(crate) supported_versions: Vec<String>,
 }
 
 impl WorkshopItem {
@@ -96,6 +100,28 @@ struct PublishedFileDetails {
     preview_url: String,
     #[serde(default, deserialize_with = "deserialize_optional_string_number")]
     subscriptions: Option<u64>,
+    #[serde(default)]
+    tags: Vec<SteamTag>,
+}
+
+#[derive(Deserialize)]
+struct SteamTag {
+    #[serde(default)]
+    tag: String,
+}
+
+/// RimWorld's uploader tags items with their supported versions as plain
+/// Steam tags such as "1.6" next to unrelated tags like "Mod".
+fn extract_supported_versions(tags: Vec<SteamTag>) -> Vec<String> {
+    let mut versions: Vec<String> = tags
+        .into_iter()
+        .map(|tag| tag.tag)
+        .filter(|tag| major_minor_version(tag).is_some())
+        .collect();
+
+    versions.sort_by_key(|version| major_minor_version(version));
+    versions.dedup();
+    versions
 }
 
 fn deserialize_optional_string_number<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -192,6 +218,7 @@ pub(crate) fn query_workshop(
                 description: details.short_description,
                 preview_url: (!details.preview_url.is_empty()).then_some(details.preview_url),
                 subscriptions: details.subscriptions,
+                supported_versions: extract_supported_versions(details.tags),
             })
         })
         .collect();
@@ -202,28 +229,93 @@ pub(crate) fn query_workshop(
     })
 }
 
-pub(crate) fn install_workshop_item(
+#[derive(Debug)]
+pub(crate) struct InstallOutcome {
+    pub(crate) published_file_id: u64,
+    pub(crate) error: Option<String>,
+}
+
+pub(crate) fn install_workshop_items(
     steamcmd_path: &Path,
-    published_file_id: u64,
-) -> io::Result<()> {
-    let output = Command::new(steamcmd_path)
-        .args([
-            "+login",
-            "anonymous",
-            "+workshop_download_item",
-            &RIMWORLD_APP_ID.to_string(),
-            &published_file_id.to_string(),
-            "+quit",
-        ])
-        .output()?;
+    published_file_ids: &[u64],
+) -> io::Result<Vec<InstallOutcome>> {
+    let mut unique_ids = Vec::with_capacity(published_file_ids.len());
+    for id in published_file_ids {
+        if !unique_ids.contains(id) {
+            unique_ids.push(*id);
+        }
+    }
+
+    let mut args = vec!["+login".to_owned(), "anonymous".to_owned()];
+    for id in &unique_ids {
+        args.push("+workshop_download_item".to_owned());
+        args.push(RIMWORLD_APP_ID.to_string());
+        args.push(id.to_string());
+    }
+    args.push("+quit".to_owned());
+
+    let output = Command::new(steamcmd_path).args(&args).output()?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}\n{stderr}");
+    let lowercase = combined.to_ascii_lowercase();
+    let global_failure =
+        !output.status.success() || steamcmd_output_reports_failure(&stdout, &stderr);
 
-    if output.status.success() && !steamcmd_output_reports_failure(&stdout, &stderr) {
-        return Ok(());
+    let outcomes = unique_ids
+        .iter()
+        .map(|&id| {
+            if contains_item_marker(&lowercase, "success. downloaded item ", id) {
+                return InstallOutcome {
+                    published_file_id: id,
+                    error: None,
+                };
+            }
+
+            if let Some(line) = combined.lines().find(|line| {
+                contains_item_marker(&line.to_ascii_lowercase(), "error! download item ", id)
+            }) {
+                return InstallOutcome {
+                    published_file_id: id,
+                    error: Some(line.trim().to_owned()),
+                };
+            }
+
+            if global_failure {
+                return InstallOutcome {
+                    published_file_id: id,
+                    error: Some(steamcmd_exit_message(&stderr, &stdout, output.status)),
+                };
+            }
+
+            InstallOutcome {
+                published_file_id: id,
+                error: None,
+            }
+        })
+        .collect();
+
+    Ok(outcomes)
+}
+
+fn contains_item_marker(lowercase: &str, prefix: &str, id: u64) -> bool {
+    let marker = format!("{prefix}{id}");
+    let bytes = lowercase.as_bytes();
+    let mut start = 0;
+
+    while let Some(offset) = lowercase[start..].find(&marker) {
+        let after_marker = start + offset + marker.len();
+        match bytes.get(after_marker) {
+            Some(next) if next.is_ascii_digit() => start += 1,
+            _ => return true,
+        }
     }
 
+    false
+}
+
+fn steamcmd_exit_message(stderr: &str, stdout: &str, status: std::process::ExitStatus) -> String {
     let details = stderr
         .lines()
         .chain(stdout.lines())
@@ -235,15 +327,13 @@ pub(crate) fn install_workshop_item(
         .unwrap_or_default()
         .trim();
 
-    let message = if details.is_empty() {
-        format!("SteamCMD exited with {}", output.status)
-    } else if output.status.success() {
+    if details.is_empty() {
+        format!("SteamCMD exited with {status}")
+    } else if status.success() {
         format!("SteamCMD reported a failure: {details}")
     } else {
-        format!("SteamCMD exited with {}: {details}", output.status)
-    };
-
-    Err(io::Error::other(message))
+        format!("SteamCMD exited with {status}: {details}")
+    }
 }
 
 fn steamcmd_output_reports_failure(stdout: &str, stderr: &str) -> bool {
