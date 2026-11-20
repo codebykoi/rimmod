@@ -2,6 +2,7 @@ use eframe::egui;
 
 use crate::app::LoadOrderStatus;
 use crate::services::mod_loader::ModLoadWarning;
+use crate::ui::theme;
 
 pub(crate) enum BottomPanelAction {
     DismissError,
@@ -22,42 +23,45 @@ pub(crate) fn show_bottom_panel(
     let version = game_version.unwrap_or("Unknown");
 
     egui::Panel::bottom("bottom_bar")
-        .show_separator_line(true)
+        .show_separator_line(false)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::SURFACE)
+                .inner_margin(egui::Margin::symmetric(14, 8)),
+        )
         .show(ui, |ui| {
             if let LoadOrderStatus::Unavailable { reason } = load_order_status {
-                let error_color = ui.visuals().error_fg_color;
-
                 egui::Frame::new()
-                    .fill(error_color.gamma_multiply(0.12))
-                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .fill(theme::tint(theme::DANGER, 26))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
 
                         ui.label(
                             egui::RichText::new("Load order unavailable: saving is disabled")
                                 .strong()
-                                .color(error_color),
+                                .color(theme::DANGER),
                         );
 
-                        ui.label(reason);
+                        theme::hint(ui, reason);
                     });
 
-                ui.add_space(4.0);
+                ui.add_space(6.0);
             }
 
             if let Some(error) = action_error {
-                let error_color = ui.visuals().error_fg_color;
-
                 egui::Frame::new()
-                    .fill(error_color.gamma_multiply(0.12))
-                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .fill(theme::tint(theme::DANGER, 26))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
 
                         egui::containers::Sides::new().show(
                             ui,
                             |ui| {
-                                ui.label(egui::RichText::new(error).strong().color(error_color));
+                                ui.label(egui::RichText::new(error).strong().color(theme::DANGER));
                             },
                             |ui| {
                                 if ui.small_button("Dismiss").clicked() {
@@ -67,11 +71,10 @@ pub(crate) fn show_bottom_panel(
                         );
                     });
 
-                ui.add_space(4.0);
+                ui.add_space(6.0);
             }
 
             if !mod_load_warnings.is_empty() {
-                let warning_color = ui.visuals().warn_fg_color;
                 let skipped_mods = mod_load_warnings
                     .iter()
                     .filter(|warning| warning.is_skipped_mod())
@@ -99,43 +102,45 @@ pub(crate) fn show_bottom_panel(
                 }
 
                 egui::Frame::new()
-                    .fill(warning_color.gamma_multiply(0.12))
-                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .fill(theme::tint(theme::WARNING, 26))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
 
                         ui.label(
                             egui::RichText::new("Mods loaded with warnings")
                                 .strong()
-                                .color(warning_color),
+                                .color(theme::WARNING),
                         );
 
-                        ui.label(format!("{}.", warning_summary.join("; ")));
+                        theme::hint(ui, format!("{}.", warning_summary.join("; ")));
 
                         egui::CollapsingHeader::new("Warning details").show(ui, |ui| {
                             for warning in mod_load_warnings {
-                                ui.label(format!("- {warning}"));
+                                theme::hint(ui, format!("- {warning}"));
                             }
                         });
                     });
 
-                ui.add_space(4.0);
+                ui.add_space(6.0);
             }
 
             egui::containers::Sides::new().height(28.0).show(
                 ui,
                 // Left side
                 |ui| {
-                    ui.label(format!("RimWorld version {version}"));
+                    ui.label(
+                        egui::RichText::new(format!("RimWorld {version}"))
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
                 },
                 // Right side
                 |ui| {
                     // Sides places right-hand widgets from right to left,
-                    // so these appear visually in reverse order.
-                    if ui
-                        .add_sized([90.0, 24.0], egui::Button::new("Run"))
-                        .clicked()
-                    {
+                    // so these appear visually as Sort, Save, Run.
+                    if theme::primary_button(ui, "Run").clicked() {
                         requested_action = Some(BottomPanelAction::Run);
                     }
 
@@ -145,20 +150,17 @@ pub(crate) fn show_bottom_panel(
                     };
 
                     let save_response = ui
-                        .add_enabled(
-                            load_order_status.can_save(),
-                            egui::Button::new("Save").min_size(egui::vec2(90.0, 24.0)),
-                        )
+                        .add_enabled_ui(load_order_status.can_save(), |ui| {
+                            theme::secondary_button(ui, "Save")
+                        })
+                        .inner
                         .on_disabled_hover_text(disabled_reason);
 
                     if save_response.clicked() {
                         requested_action = Some(BottomPanelAction::Save);
                     }
 
-                    if ui
-                        .add_sized([90.0, 24.0], egui::Button::new("Sort"))
-                        .clicked()
-                    {
+                    if theme::secondary_button(ui, "Sort").clicked() {
                         requested_action = Some(BottomPanelAction::Sort);
                     }
                 },

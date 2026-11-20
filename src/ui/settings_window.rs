@@ -1,7 +1,10 @@
 use eframe::egui;
 use std::path::PathBuf;
 
-use crate::{app::UiState, ui::OpenTarget};
+use crate::{
+    app::UiState,
+    ui::{OpenTarget, theme},
+};
 
 pub(crate) enum SettingsAction {
     Apply,
@@ -17,11 +20,11 @@ fn show_path_setting(
 ) -> Option<OpenTarget> {
     let mut requested_open = None;
 
-    ui.group(|ui| {
+    theme::group().show(ui, |ui| {
         egui::containers::Sides::new().height(24.0).show(
             ui,
             |ui| {
-                ui.label(egui::RichText::new(title).strong());
+                ui.label(egui::RichText::new(title).text_style(theme::strong_style()));
             },
             |ui| {
                 // Sides places right-side widgets from right to left.
@@ -55,7 +58,13 @@ fn show_path_setting(
         ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY));
 
         if let Some(error_text) = error_text {
-            ui.colored_label(ui.visuals().error_fg_color, error_text);
+            ui.add_space(2.0);
+
+            ui.label(
+                egui::RichText::new(error_text)
+                    .font(theme::medium_font(12.0))
+                    .color(theme::DANGER),
+            );
         }
     });
 
@@ -70,11 +79,11 @@ fn show_file_setting(
 ) -> Option<OpenTarget> {
     let mut requested_open = None;
 
-    ui.group(|ui| {
+    theme::group().show(ui, |ui| {
         egui::containers::Sides::new().height(24.0).show(
             ui,
             |ui| {
-                ui.label(egui::RichText::new(title).strong());
+                ui.label(egui::RichText::new(title).text_style(theme::strong_style()));
             },
             |ui| {
                 if ui.button("Clear...").clicked() {
@@ -108,7 +117,13 @@ fn show_file_setting(
         ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY));
 
         if let Some(error_text) = error_text {
-            ui.colored_label(ui.visuals().error_fg_color, error_text);
+            ui.add_space(2.0);
+
+            ui.label(
+                egui::RichText::new(error_text)
+                    .font(theme::medium_font(12.0))
+                    .color(theme::DANGER),
+            );
         }
     });
 
@@ -182,14 +197,17 @@ pub(crate) fn display_settings(ui: &mut egui::Ui, state: &mut UiState) -> Option
 
             ui.add_space(10.0);
 
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("Steam Web API key").strong());
+            theme::group().show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Steam Web API key").text_style(theme::strong_style()),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut state.steam_web_api_key_input)
                         .password(true)
                         .desired_width(f32::INFINITY),
                 );
-                ui.small(
+                theme::hint(
+                    ui,
                     "Required for Workshop catalog searches. Stored in RimMod's local settings.",
                 );
                 ui.hyperlink_to(
@@ -205,11 +223,11 @@ pub(crate) fn display_settings(ui: &mut egui::Ui, state: &mut UiState) -> Option
                 |_| {},
                 |ui| {
                     // Sides places right-side widgets from right to left.
-                    if ui.button("Apply").clicked() {
+                    if theme::primary_button(ui, "Apply").clicked() {
                         requested_action = Some(SettingsAction::Apply);
                     }
 
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         requested_action = Some(SettingsAction::Cancel);
                     }
                 },

@@ -8,6 +8,7 @@ use crate::services::no_version_warning::CoveredMods;
 use crate::services::workshop::{WorkshopItem, WorkshopSort, is_item_installed};
 use crate::ui::OpenTarget;
 use crate::ui::mod_info::show_supported_versions;
+use crate::ui::theme;
 
 pub(crate) const ITEMS_PER_PAGE: u64 = 30;
 const PREVIEW_SIZE: egui::Vec2 = egui::vec2(144.0, 96.0);
@@ -234,7 +235,8 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
 
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
-                                let title = egui::RichText::new(&item.title).strong().size(16.0);
+                                let title = egui::RichText::new(&item.title)
+                                    .font(theme::semibold_font(14.0));
                                 if ui
                                     .add(egui::Link::new(title))
                                     .on_hover_text("Open Steam Workshop page")
