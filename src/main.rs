@@ -13,8 +13,13 @@ fn main() -> eframe::Result {
         Ok(icon) => eframe::egui::ViewportBuilder::default().with_icon(icon),
         Err(_) => eframe::egui::ViewportBuilder::default(),
     };
+    let surface_config = eframe::SurfaceConfig {
+        present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+        ..eframe::SurfaceConfig::HIGH_THROUGHPUT
+    };
     let native_options = eframe::NativeOptions {
         viewport,
+        wgpu_options: eframe::WgpuConfiguration::default().with_surface_config(surface_config),
         ..Default::default()
     };
 
