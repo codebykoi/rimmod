@@ -27,7 +27,7 @@ pub(crate) fn show_bottom_panel(
         .frame(
             egui::Frame::new()
                 .fill(theme::SURFACE)
-                .inner_margin(egui::Margin::symmetric(14, 8)),
+                .inner_margin(egui::Margin::symmetric(18, 8)),
         )
         .show(ui, |ui| {
             if let LoadOrderStatus::Unavailable { reason } = load_order_status {

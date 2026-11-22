@@ -222,372 +222,395 @@ pub(crate) fn show_mod_list(ui: &mut egui::Ui, view: ModListView<'_>) -> Option<
     };
 
     ui.push_id(kind.id(), |ui| {
-        theme::card().show(ui, |ui| {
-            ui.set_min_height(ui.available_height());
+        theme::gradient_surface(
+            ui,
+            theme::SURFACE_HOVER,
+            theme::SURFACE,
+            egui::Margin::same(12),
+            |ui| {
+                ui.set_min_height(ui.available_height());
 
-            ui.horizontal(|ui| {
-                theme::title(ui, heading);
+                ui.horizontal(|ui| {
+                    theme::title(ui, heading);
 
-                if selected_count > 1 {
-                    theme::chip(ui, format!("{selected_count} selected"), theme::ACCENT);
-                } else {
-                    theme::chip(ui, count.to_string(), theme::TEXT_MUTED);
+                    if selected_count > 1 {
+                        theme::chip(ui, format!("{selected_count} selected"), theme::ACCENT);
+                    } else {
+                        theme::chip(ui, count.to_string(), theme::TEXT_MUTED);
+                    }
+                });
+
+                ui.add_space(6.0);
+
+                ui.add(
+                    egui::TextEdit::singleline(search_string)
+                        .hint_text("Search mods")
+                        .desired_width(f32::INFINITY),
+                );
+
+                ui.add_space(6.0);
+
+                let visible_list_positions =
+                    fuzzy_mod_indices(&mods.all, mod_ids, search_string, matcher);
+                let visible_mod_ids = visible_list_positions
+                    .iter()
+                    .map(|&list_position| mod_ids[list_position])
+                    .collect::<Vec<_>>();
+
+                if visible_mod_ids.is_empty() {
+                    if search_string.is_empty() {
+                        theme::hint(ui, "No mods in this list yet");
+                    } else {
+                        theme::hint(ui, "No mods match this search");
+                    }
                 }
-            });
 
-            ui.add_space(6.0);
+                let row_height = theme::ROW_HEIGHT;
 
-            ui.add(
-                egui::TextEdit::singleline(search_string)
-                    .hint_text("Search mods")
-                    .desired_width(f32::INFINITY),
-            );
+                let list_response = ui
+                    .scope(|ui| {
+                        // Rows stay flat at rest; only hover, selection and drag paint.
+                        let widgets = &mut ui.style_mut().visuals.widgets;
+                        widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                        widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                        widgets.inactive.bg_stroke = egui::Stroke::NONE;
 
-            ui.add_space(6.0);
+                        ui.spacing_mut().item_spacing.y = 4.0;
 
-            let visible_list_positions =
-                fuzzy_mod_indices(&mods.all, mod_ids, search_string, matcher);
-            let visible_mod_ids = visible_list_positions
-                .iter()
-                .map(|&list_position| mod_ids[list_position])
-                .collect::<Vec<_>>();
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show_rows(
+                                ui,
+                                row_height,
+                                visible_list_positions.len(),
+                                |ui, visible_rows| {
+                                    for visible_row in visible_rows {
+                                        let list_position = visible_list_positions[visible_row];
+                                        let mod_id = mod_ids[list_position];
 
-            if visible_mod_ids.is_empty() {
-                if search_string.is_empty() {
-                    theme::hint(ui, "No mods in this list yet");
-                } else {
-                    theme::hint(ui, "No mods match this search");
-                }
-            }
+                                        let Some(rimworld_mod) = mods.get(mod_id) else {
+                                            continue;
+                                        };
 
-            let row_height = theme::ROW_HEIGHT;
+                                        let is_selected = selection_kind == Some(kind)
+                                            && selected_mod_ids.contains(&mod_id);
 
-            let list_response = ui
-                .scope(|ui| {
-                    // Rows stay flat at rest; only hover, selection and drag paint.
-                    let widgets = &mut ui.style_mut().visuals.widgets;
-                    widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                    widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                    widgets.inactive.bg_stroke = egui::Stroke::NONE;
-
-                    ui.spacing_mut().item_spacing.y = 4.0;
-
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show_rows(
-                            ui,
-                            row_height,
-                            visible_list_positions.len(),
-                            |ui, visible_rows| {
-                                for visible_row in visible_rows {
-                                    let list_position = visible_list_positions[visible_row];
-                                    let mod_id = mod_ids[list_position];
-
-                                    let Some(rimworld_mod) = mods.get(mod_id) else {
-                                        continue;
-                                    };
-
-                                    let is_selected = selection_kind == Some(kind)
-                                        && selected_mod_ids.contains(&mod_id);
-
-                                    let dragged_mod_ids = if is_selected {
-                                        mod_ids
-                                            .iter()
-                                            .copied()
-                                            .filter(|candidate| {
-                                                selected_mod_ids.contains(candidate)
-                                            })
-                                            .collect()
-                                    } else {
-                                        vec![mod_id]
-                                    };
-                                    let dragged_mods = DraggedMods {
-                                        mod_ids: dragged_mod_ids,
-                                        from: kind,
-                                    };
-
-                                    let order_warning = if kind == ModListKind::Enabled {
-                                        order_warnings.get(&mod_id)
-                                    } else {
-                                        None
-                                    };
-
-                                    let icon_height = ui.text_style_height(&egui::TextStyle::Body)
-                                        * INLINE_ICON_SCALE;
-
-                                    let source_icon =
-                                        egui::Image::new(mod_source_icon(&rimworld_mod.source))
-                                            .tint(egui::Color32::from_white_alpha(170))
-                                            .atom_max_height(icon_height);
-
-                                    let type_icon =
-                                        egui::Image::new(mod_type_icon(&rimworld_mod.mod_type))
-                                            .tint(egui::Color32::from_white_alpha(170))
-                                            .atom_max_height(icon_height);
-
-                                    // One response handles both gestures. egui waits for enough
-                                    // pointer movement before classifying the gesture as a drag.
-
-                                    let mut button = egui::Button::selectable(
-                                        is_selected,
-                                        (source_icon, type_icon, &rimworld_mod.name),
-                                    )
-                                    .min_size(egui::vec2(ui.available_width(), row_height))
-                                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD));
-
-                                    let version_badge = version_badge(rimworld_mod, game_version);
-
-                                    let mut right_side = Vec::<Atom<'static>>::new();
-
-                                    if order_warning.is_some() {
-                                        let warning_icon =
-                                            warning_icon().atom_max_height(icon_height);
-                                        right_side.push(warning_icon);
-                                    }
-
-                                    if let Some(badge) = &version_badge {
-                                        if badge.community_report {
-                                            let community_icon = no_version_warning_icon()
-                                                .atom_max_height(icon_height);
-                                            right_side.push(community_icon);
-                                        }
-
-                                        let version_text = RichText::new(&badge.text)
-                                            .font(theme::medium_font(11.0))
-                                            .color(badge.color);
-                                        right_side.push(version_text.into());
-                                    }
-
-                                    if !right_side.is_empty() {
-                                        button = button.right_text(Atoms::from(right_side));
-                                    }
-
-                                    let response =
-                                        ui.add(button.sense(egui::Sense::click_and_drag()));
-
-                                    if is_selected {
-                                        let row_rect = response.rect;
-                                        let accent_bar = egui::Rect::from_min_max(
-                                            egui::pos2(row_rect.left() + 1.0, row_rect.top() + 4.0),
-                                            egui::pos2(
-                                                row_rect.left() + 3.0,
-                                                row_rect.bottom() - 4.0,
-                                            ),
-                                        );
-
-                                        ui.painter().rect_filled(
-                                            accent_bar,
-                                            egui::CornerRadius::same(1),
-                                            theme::ACCENT,
-                                        );
-                                    }
-
-                                    // Version support is already shown by the badge, so
-                                    // only load-order problems get a tooltip.
-                                    let response = if let Some(warning) = order_warning {
-                                        response
-                                            .on_hover_text(order_warning_text(warning, &mods.all))
-                                    } else {
-                                        response
-                                    };
-
-                                    response.context_menu(|ui| {
-                                        if dragged_mods.mod_ids.len() > 1 {
-                                            ui.strong(format!(
-                                                "{} mods selected",
-                                                dragged_mods.mod_ids.len()
-                                            ));
+                                        let dragged_mod_ids = if is_selected {
+                                            mod_ids
+                                                .iter()
+                                                .copied()
+                                                .filter(|candidate| {
+                                                    selected_mod_ids.contains(candidate)
+                                                })
+                                                .collect()
                                         } else {
-                                            ui.strong(&rimworld_mod.name);
-                                            ui.label(rimworld_mod.package_id.as_str());
+                                            vec![mod_id]
+                                        };
+                                        let dragged_mods = DraggedMods {
+                                            mod_ids: dragged_mod_ids,
+                                            from: kind,
+                                        };
 
-                                            if !rimworld_mod.supported_versions.is_empty() {
-                                                ui.label(format!(
-                                                    "Supported versions: {}",
-                                                    rimworld_mod.supported_versions.join(", ")
-                                                ));
-                                            }
+                                        let order_warning = if kind == ModListKind::Enabled {
+                                            order_warnings.get(&mod_id)
+                                        } else {
+                                            None
+                                        };
+
+                                        let icon_height = ui
+                                            .text_style_height(&egui::TextStyle::Body)
+                                            * INLINE_ICON_SCALE;
+
+                                        let source_icon =
+                                            egui::Image::new(mod_source_icon(&rimworld_mod.source))
+                                                .tint(egui::Color32::from_white_alpha(170))
+                                                .atom_max_height(icon_height);
+
+                                        let type_icon =
+                                            egui::Image::new(mod_type_icon(&rimworld_mod.mod_type))
+                                                .tint(egui::Color32::from_white_alpha(170))
+                                                .atom_max_height(icon_height);
+
+                                        // One response handles both gestures. egui waits for enough
+                                        // pointer movement before classifying the gesture as a drag.
+
+                                        let mut button = egui::Button::selectable(
+                                            is_selected,
+                                            (source_icon, type_icon, &rimworld_mod.name),
+                                        )
+                                        .min_size(egui::vec2(
+                                            (ui.available_width() - theme::SCROLL_GUTTER).max(80.0),
+                                            row_height,
+                                        ))
+                                        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD));
+
+                                        let version_badge =
+                                            version_badge(rimworld_mod, game_version);
+
+                                        let mut right_side = Vec::<Atom<'static>>::new();
+
+                                        if order_warning.is_some() {
+                                            let warning_icon =
+                                                warning_icon().atom_max_height(icon_height);
+                                            right_side.push(warning_icon);
                                         }
 
-                                        ui.separator();
+                                        if let Some(badge) = &version_badge {
+                                            if badge.community_report {
+                                                let community_icon = no_version_warning_icon()
+                                                    .atom_max_height(icon_height);
+                                                right_side.push(community_icon);
+                                            }
 
-                                        let transfer_label =
-                                            match (kind, dragged_mods.mod_ids.len()) {
-                                                (ModListKind::Enabled, 1) => "Disable".to_owned(),
-                                                (ModListKind::Disabled, 1) => "Enable".to_owned(),
-                                                (ModListKind::Enabled, count) => {
-                                                    format!("Disable {count} mods")
+                                            let version_text = RichText::new(&badge.text)
+                                                .font(theme::medium_font(11.0))
+                                                .color(badge.color);
+                                            right_side.push(version_text.into());
+                                        }
+
+                                        if !right_side.is_empty() {
+                                            button = button.right_text(Atoms::from(right_side));
+                                        }
+
+                                        let response =
+                                            ui.add(button.sense(egui::Sense::click_and_drag()));
+
+                                        if is_selected {
+                                            let row_rect = response.rect;
+                                            let accent_bar = egui::Rect::from_min_max(
+                                                egui::pos2(
+                                                    row_rect.left() + 1.0,
+                                                    row_rect.top() + 4.0,
+                                                ),
+                                                egui::pos2(
+                                                    row_rect.left() + 3.0,
+                                                    row_rect.bottom() - 4.0,
+                                                ),
+                                            );
+
+                                            ui.painter().rect_filled(
+                                                accent_bar,
+                                                egui::CornerRadius::same(1),
+                                                theme::ACCENT,
+                                            );
+                                        }
+
+                                        // Version support is already shown by the badge, so
+                                        // only load-order problems get a tooltip.
+                                        let response = if let Some(warning) = order_warning {
+                                            response.on_hover_text(order_warning_text(
+                                                warning, &mods.all,
+                                            ))
+                                        } else {
+                                            response
+                                        };
+
+                                        response.context_menu(|ui| {
+                                            if dragged_mods.mod_ids.len() > 1 {
+                                                ui.strong(format!(
+                                                    "{} mods selected",
+                                                    dragged_mods.mod_ids.len()
+                                                ));
+                                            } else {
+                                                ui.strong(&rimworld_mod.name);
+                                                ui.label(rimworld_mod.package_id.as_str());
+
+                                                if !rimworld_mod.supported_versions.is_empty() {
+                                                    ui.label(format!(
+                                                        "Supported versions: {}",
+                                                        rimworld_mod.supported_versions.join(", ")
+                                                    ));
                                                 }
-                                                (ModListKind::Disabled, count) => {
-                                                    format!("Enable {count} mods")
-                                                }
+                                            }
+
+                                            ui.separator();
+
+                                            let transfer_label =
+                                                match (kind, dragged_mods.mod_ids.len()) {
+                                                    (ModListKind::Enabled, 1) => {
+                                                        "Disable".to_owned()
+                                                    }
+                                                    (ModListKind::Disabled, 1) => {
+                                                        "Enable".to_owned()
+                                                    }
+                                                    (ModListKind::Enabled, count) => {
+                                                        format!("Disable {count} mods")
+                                                    }
+                                                    (ModListKind::Disabled, count) => {
+                                                        format!("Enable {count} mods")
+                                                    }
+                                                };
+
+                                            if ui.button(transfer_label).clicked() {
+                                                requested_action = Some(ModListAction::Transfer {
+                                                    mod_ids: dragged_mods.mod_ids.clone(),
+                                                    from: kind,
+                                                    to: kind.other(),
+                                                    before_mod_id: None,
+                                                });
+
+                                                ui.close();
+                                            }
+
+                                            ui.separator();
+
+                                            let can_delete =
+                                                dragged_mods.mod_ids.iter().all(|&mod_id| {
+                                                    mods.get(mod_id).is_some_and(|rimworld_mod| {
+                                                        !matches!(
+                                                            rimworld_mod.source,
+                                                            ModSource::Official
+                                                        )
+                                                    })
+                                                });
+                                            let delete_label = match dragged_mods.mod_ids.len() {
+                                                1 => "Delete".to_owned(),
+                                                count => format!("Delete {count} mods"),
                                             };
+                                            let delete_button = egui::Button::new(
+                                                egui::RichText::new(delete_label)
+                                                    .color(ui.visuals().error_fg_color),
+                                            );
 
-                                        if ui.button(transfer_label).clicked() {
+                                            if ui.add_enabled(can_delete, delete_button).clicked() {
+                                                requested_action = Some(ModListAction::Delete {
+                                                    mod_ids: dragged_mods.mod_ids.clone(),
+                                                });
+                                                ui.close();
+                                            }
+
+                                            if !can_delete {
+                                                ui.label(
+                                                egui::RichText::new(
+                                                    "Official RimWorld content cannot be deleted",
+                                                )
+                                                .weak(),
+                                            );
+                                            }
+
+                                            // ui.separator();
+
+                                            // TODO: Make check for the Git
+                                            // ui.add_enabled_ui(false, |ui| {
+                                            //     ui.button("Git: Update").on_disabled_hover_ui(|ui| {
+                                            //         ui.style_mut().interaction.selectable_labels = true;
+                                            //         ui.label("Requires Git to be installed");
+                                            //         ui.hyperlink_to(
+                                            //             "Download Git",
+                                            //             "https://git-scm.com/install/windows",
+                                            //         );
+                                            //     });
+                                            // });
+                                        });
+
+                                        response.dnd_set_drag_payload(dragged_mods.clone());
+
+                                        let was_activated =
+                                            response.double_clicked() || response.triple_clicked();
+
+                                        if is_selected && was_activated {
                                             requested_action = Some(ModListAction::Transfer {
                                                 mod_ids: dragged_mods.mod_ids.clone(),
                                                 from: kind,
                                                 to: kind.other(),
                                                 before_mod_id: None,
                                             });
-
-                                            ui.close();
-                                        }
-
-                                        ui.separator();
-
-                                        let can_delete =
-                                            dragged_mods.mod_ids.iter().all(|&mod_id| {
-                                                mods.get(mod_id).is_some_and(|rimworld_mod| {
-                                                    !matches!(
-                                                        rimworld_mod.source,
-                                                        ModSource::Official
-                                                    )
-                                                })
-                                            });
-                                        let delete_label = match dragged_mods.mod_ids.len() {
-                                            1 => "Delete".to_owned(),
-                                            count => format!("Delete {count} mods"),
-                                        };
-                                        let delete_button = egui::Button::new(
-                                            egui::RichText::new(delete_label)
-                                                .color(ui.visuals().error_fg_color),
-                                        );
-
-                                        if ui.add_enabled(can_delete, delete_button).clicked() {
-                                            requested_action = Some(ModListAction::Delete {
-                                                mod_ids: dragged_mods.mod_ids.clone(),
-                                            });
-                                            ui.close();
-                                        }
-
-                                        if !can_delete {
-                                            ui.label(
-                                                egui::RichText::new(
-                                                    "Official RimWorld content cannot be deleted",
+                                        } else if response.clicked() {
+                                            let modifiers = ui.input(|input| input.modifiers);
+                                            let mode = if modifiers.shift {
+                                                selection_range(
+                                                    &visible_mod_ids,
+                                                    selection_anchor_id
+                                                        .filter(|_| selection_kind == Some(kind)),
+                                                    mod_id,
                                                 )
-                                                .weak(),
-                                            );
-                                        }
+                                                .map_or(
+                                                    SelectionMode::Replace,
+                                                    SelectionMode::Range,
+                                                )
+                                            } else if modifiers.command {
+                                                SelectionMode::Toggle
+                                            } else {
+                                                SelectionMode::Replace
+                                            };
 
-                                        // ui.separator();
-
-                                        // TODO: Make check for the Git
-                                        // ui.add_enabled_ui(false, |ui| {
-                                        //     ui.button("Git: Update").on_disabled_hover_ui(|ui| {
-                                        //         ui.style_mut().interaction.selectable_labels = true;
-                                        //         ui.label("Requires Git to be installed");
-                                        //         ui.hyperlink_to(
-                                        //             "Download Git",
-                                        //             "https://git-scm.com/install/windows",
-                                        //         );
-                                        //     });
-                                        // });
-                                    });
-
-                                    response.dnd_set_drag_payload(dragged_mods.clone());
-
-                                    let was_activated =
-                                        response.double_clicked() || response.triple_clicked();
-
-                                    if is_selected && was_activated {
-                                        requested_action = Some(ModListAction::Transfer {
-                                            mod_ids: dragged_mods.mod_ids.clone(),
-                                            from: kind,
-                                            to: kind.other(),
-                                            before_mod_id: None,
-                                        });
-                                    } else if response.clicked() {
-                                        let modifiers = ui.input(|input| input.modifiers);
-                                        let mode = if modifiers.shift {
-                                            selection_range(
-                                                &visible_mod_ids,
-                                                selection_anchor_id
-                                                    .filter(|_| selection_kind == Some(kind)),
+                                            requested_action =
+                                                Some(ModListAction::Select { mod_id, kind, mode });
+                                        } else if response.secondary_clicked() && !is_selected {
+                                            requested_action = Some(ModListAction::Select {
                                                 mod_id,
-                                            )
-                                            .map_or(SelectionMode::Replace, SelectionMode::Range)
-                                        } else if modifiers.command {
-                                            SelectionMode::Toggle
-                                        } else {
-                                            SelectionMode::Replace
-                                        };
-
-                                        requested_action =
-                                            Some(ModListAction::Select { mod_id, kind, mode });
-                                    } else if response.secondary_clicked() && !is_selected {
-                                        requested_action = Some(ModListAction::Select {
-                                            mod_id,
-                                            kind,
-                                            mode: SelectionMode::Replace,
-                                        });
-                                    }
-
-                                    let pointer_position =
-                                        ui.input(|input| input.pointer.interact_pos());
-                                    let hovered_mods = response.dnd_hover_payload::<DraggedMods>();
-
-                                    if let (Some(pointer_position), Some(hovered_mods)) =
-                                        (pointer_position, hovered_mods)
-                                    {
-                                        let row_rect = response.rect;
-                                        let insertion_stroke = egui::Stroke::new(
-                                            2.0,
-                                            ui.visuals().selection.stroke.color,
-                                        );
-
-                                        let before_mod_id = if hovered_mods.from == kind
-                                            && hovered_mods.mod_ids.contains(&mod_id)
-                                        {
-                                            ui.painter().hline(
-                                                row_rect.x_range(),
-                                                row_rect.center().y,
-                                                insertion_stroke,
-                                            );
-                                            Some(mod_id)
-                                        } else if pointer_position.y < row_rect.center().y {
-                                            ui.painter().hline(
-                                                row_rect.x_range(),
-                                                row_rect.top(),
-                                                insertion_stroke,
-                                            );
-                                            Some(mod_id)
-                                        } else {
-                                            ui.painter().hline(
-                                                row_rect.x_range(),
-                                                row_rect.bottom(),
-                                                insertion_stroke,
-                                            );
-
-                                            visible_list_positions
-                                                .get(visible_row + 1)
-                                                .and_then(|&next_list_position| {
-                                                    mod_ids.get(next_list_position)
-                                                })
-                                                .copied()
-                                        };
-
-                                        if let Some(dropped_mods) =
-                                            response.dnd_release_payload::<DraggedMods>()
-                                        {
-                                            requested_action = Some(action_for_drop(
-                                                &dropped_mods,
                                                 kind,
-                                                before_mod_id,
-                                            ));
+                                                mode: SelectionMode::Replace,
+                                            });
+                                        }
+
+                                        let pointer_position =
+                                            ui.input(|input| input.pointer.interact_pos());
+                                        let hovered_mods =
+                                            response.dnd_hover_payload::<DraggedMods>();
+
+                                        if let (Some(pointer_position), Some(hovered_mods)) =
+                                            (pointer_position, hovered_mods)
+                                        {
+                                            let row_rect = response.rect;
+                                            let insertion_stroke = egui::Stroke::new(
+                                                2.0,
+                                                ui.visuals().selection.stroke.color,
+                                            );
+
+                                            let before_mod_id = if hovered_mods.from == kind
+                                                && hovered_mods.mod_ids.contains(&mod_id)
+                                            {
+                                                ui.painter().hline(
+                                                    row_rect.x_range(),
+                                                    row_rect.center().y,
+                                                    insertion_stroke,
+                                                );
+                                                Some(mod_id)
+                                            } else if pointer_position.y < row_rect.center().y {
+                                                ui.painter().hline(
+                                                    row_rect.x_range(),
+                                                    row_rect.top(),
+                                                    insertion_stroke,
+                                                );
+                                                Some(mod_id)
+                                            } else {
+                                                ui.painter().hline(
+                                                    row_rect.x_range(),
+                                                    row_rect.bottom(),
+                                                    insertion_stroke,
+                                                );
+
+                                                visible_list_positions
+                                                    .get(visible_row + 1)
+                                                    .and_then(|&next_list_position| {
+                                                        mod_ids.get(next_list_position)
+                                                    })
+                                                    .copied()
+                                            };
+
+                                            if let Some(dropped_mods) =
+                                                response.dnd_release_payload::<DraggedMods>()
+                                            {
+                                                requested_action = Some(action_for_drop(
+                                                    &dropped_mods,
+                                                    kind,
+                                                    before_mod_id,
+                                                ));
+                                            }
                                         }
                                     }
-                                }
-                            },
-                        );
-                })
-                .response;
+                                },
+                            );
+                    })
+                    .response;
 
-            if let Some(dropped_mods) = list_response.dnd_release_payload::<DraggedMods>() {
-                // Dropping on the list's empty space appends the mod to that list.
-                requested_action = Some(action_for_drop(&dropped_mods, kind, None));
-            }
-        });
+                if let Some(dropped_mods) = list_response.dnd_release_payload::<DraggedMods>() {
+                    // Dropping on the list's empty space appends the mod to that list.
+                    requested_action = Some(action_for_drop(&dropped_mods, kind, None));
+                }
+            },
+        );
     });
 
     requested_action

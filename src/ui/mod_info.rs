@@ -13,113 +13,121 @@ pub(crate) fn show_mod_info(
     let mut requested_open = None;
 
     ui.push_id("mod_information", |ui| {
-        theme::card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            theme::title(ui, "Mod information");
-            ui.add_space(8.0);
+        theme::gradient_surface(
+            ui,
+            theme::SURFACE_HOVER,
+            theme::SURFACE,
+            egui::Margin::same(12),
+            |ui| {
+                ui.set_width(ui.available_width());
+                theme::title(ui, "Mod information");
+                ui.add_space(8.0);
 
-            if let Some(selected_mod) = selected_mod {
-                let preview_path = selected_mod.folder.join("About").join("Preview.png");
+                if let Some(selected_mod) = selected_mod {
+                    let preview_path = selected_mod.folder.join("About").join("Preview.png");
 
-                if preview_path.is_file() {
-                    let preview_path_text = preview_path.to_string_lossy().replace('\\', "/");
-                    let preview_uri = format!("file:///{preview_path_text}");
+                    if preview_path.is_file() {
+                        let preview_path_text = preview_path.to_string_lossy().replace('\\', "/");
+                        let preview_uri = format!("file:///{preview_path_text}");
 
-                    ui.vertical_centered(|ui| {
-                        ui.add(
-                            egui::Image::from_uri(preview_uri)
-                                .max_width(ui.available_width())
-                                .max_height(300.0)
-                                .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD)),
+                        ui.vertical_centered(|ui| {
+                            ui.add(
+                                egui::Image::from_uri(preview_uri)
+                                    .max_width(ui.available_width())
+                                    .max_height(300.0)
+                                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD)),
+                            );
+                        });
+                    } else {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 140.0),
+                            egui::Sense::hover(),
                         );
-                    });
-                } else {
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 140.0),
-                        egui::Sense::hover(),
-                    );
 
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::CornerRadius::same(theme::RADIUS_MD),
-                        theme::CANVAS,
-                    );
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::CornerRadius::same(theme::RADIUS_MD),
+                            theme::CANVAS,
+                        );
 
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "No preview image",
-                        theme::medium_font(12.0),
-                        theme::TEXT_FAINT,
-                    );
-                }
-
-                ui.add_space(8.0);
-
-                ui.label(egui::RichText::new(&selected_mod.name).text_style(theme::strong_style()));
-
-                ui.label(
-                    egui::RichText::new(selected_mod.package_id.as_str())
-                        .monospace()
-                        .small()
-                        .color(theme::TEXT_MUTED),
-                );
-
-                ui.add_space(6.0);
-
-                show_supported_versions(
-                    ui,
-                    &selected_mod.supported_versions,
-                    &selected_mod.community_supported_versions,
-                    game_version,
-                );
-
-                if let Some(open_target) = show_source_link(ui, &selected_mod.source) {
-                    requested_open = Some(open_target);
-                }
-
-                ui.horizontal(|ui| {
-                    theme::hint(ui, "Folder:");
-
-                    let folder_text = selected_mod.folder.display().to_string();
-
-                    if theme::link(ui, folder_text).clicked() {
-                        requested_open = Some(OpenTarget::Folder(selected_mod.folder.clone()));
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "No preview image",
+                            theme::medium_font(12.0),
+                            theme::TEXT_FAINT,
+                        );
                     }
-                });
 
-                ui.add_space(8.0);
+                    ui.add_space(8.0);
 
-                ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(&selected_mod.name).text_style(theme::strong_style()),
+                    );
 
-                egui::Frame::new()
-                    .fill(theme::CANVAS)
-                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
-                    .inner_margin(egui::Margin::same(10))
-                    .show(ui, |ui| {
-                        // Sizes must come from inside the frame: measuring the
-                        // outer column here would make the frame (and the card)
-                        // wider than the column it lives in.
-                        let max_height = ui.available_height();
+                    ui.label(
+                        egui::RichText::new(selected_mod.package_id.as_str())
+                            .monospace()
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
 
-                        egui::ScrollArea::vertical()
-                            .id_salt("mod_description")
-                            .max_height(max_height)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&selected_mod.description)
-                                            .color(theme::TEXT_MUTED),
-                                    )
-                                    .wrap(),
-                                );
-                            });
+                    ui.add_space(6.0);
+
+                    show_supported_versions(
+                        ui,
+                        &selected_mod.supported_versions,
+                        &selected_mod.community_supported_versions,
+                        game_version,
+                    );
+
+                    if let Some(open_target) = show_source_link(ui, &selected_mod.source) {
+                        requested_open = Some(open_target);
+                    }
+
+                    ui.horizontal(|ui| {
+                        theme::hint(ui, "Folder:");
+
+                        let folder_text = selected_mod.folder.display().to_string();
+
+                        if theme::link(ui, folder_text).clicked() {
+                            requested_open = Some(OpenTarget::Folder(selected_mod.folder.clone()));
+                        }
                     });
-            } else {
-                theme::hint(ui, "Select a mod to see its details");
-            }
-        });
+
+                    ui.add_space(8.0);
+
+                    ui.add_space(8.0);
+
+                    egui::Frame::new()
+                        .fill(theme::CANVAS)
+                        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                        .inner_margin(egui::Margin::same(10))
+                        .show(ui, |ui| {
+                            // Sizes must come from inside the frame: measuring the
+                            // outer column here would make the frame (and the card)
+                            // wider than the column it lives in.
+                            let max_height = ui.available_height();
+
+                            egui::ScrollArea::vertical()
+                                .id_salt("mod_description")
+                                .max_height(max_height)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&selected_mod.description)
+                                                .color(theme::TEXT_MUTED),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                        });
+                } else {
+                    theme::hint(ui, "Select a mod to see its details");
+                }
+            },
+        );
     });
 
     requested_open
