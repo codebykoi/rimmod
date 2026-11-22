@@ -208,7 +208,7 @@ pub(crate) fn display_settings(ui: &mut egui::Ui, state: &mut UiState) -> Option
                 );
                 theme::hint(
                     ui,
-                    "Required for Workshop catalog searches. Stored in RimMod's local settings.",
+                    "Used to search the Workshop and to subscribe or unsubscribe. It must belong to the Steam account you use for RimWorld. Stored in RimMod's local settings.",
                 );
                 ui.hyperlink_to(
                     "Get a Steam Web API key",

@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::time::Instant;
 
-use eframe::egui::{self, Color32, Shadow};
+use eframe::egui;
 use egui_notify::Toasts;
 use nucleo_matcher::Matcher;
 
@@ -17,7 +17,9 @@ use crate::services::{load_order, mod_sorter};
 use crate::ui::mod_info::show_mod_info;
 use crate::ui::mod_list::{ModListKind, ModListView, show_mod_list};
 use crate::ui::settings_window::{SettingsAction, display_settings};
-use crate::ui::workshop::{CoveredModsState, WorkshopAction, WorkshopView, show_workshop};
+use crate::ui::workshop::{
+    CoveredModsState, WorkshopAction, WorkshopTab, WorkshopView, show_workshop,
+};
 use crate::ui::{OpenTarget, bottom_panel, theme, top_panel};
 
 mod deletion;
@@ -31,7 +33,7 @@ mod workshop_ctrl;
 use self::deletion::PendingModDeletion;
 use self::history::LoadOrderSnapshot;
 use self::settings_apply::{path_from_input, path_to_input, persist_settings};
-use self::workshop_ctrl::{CoveredModsStatus, WorkshopState};
+use self::workshop_ctrl::{CoveredModsStatus, SubscriptionStatus, WorkshopState};
 
 const SETTINGS_STORAGE_KEY: &str = "rimmod_settings";
 
@@ -135,12 +137,7 @@ impl App {
 
         let mut app = Self {
             settings,
-            toasts: Toasts::default().with_shadow(Shadow {
-                offset: Default::default(),
-                blur: 30,
-                spread: 5,
-                color: Color32::from_black_alpha(70),
-            }),
+            toasts: Toasts::default().with_shadow(theme::soft_shadow()),
             ..Self::default()
         };
 
@@ -322,6 +319,7 @@ impl eframe::App for App {
                     match self.try_apply_settings(candidate) {
                         Ok(()) => {
                             self.restart_mod_watcher(ui.ctx());
+                            self.reset_workshop_data();
                             self.state.settings_errors = SettingsErrors::default();
                             self.state.settings_open = false;
 
@@ -390,117 +388,154 @@ impl eframe::App for App {
             workshop::steamcmd_workshop_path(self.settings.steamcmd_path());
 
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::CANVAS)
-                    .inner_margin(egui::Margin::symmetric(14, 10)),
-            )
+            .frame(egui::Frame::new().fill(theme::CANVAS))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if theme::tab(ui, self.current_tab == AppTab::Mods, "Mods").clicked() {
-                        self.current_tab = AppTab::Mods;
-                    }
+                theme::paint_background_gradient(ui, theme::CANVAS_TOP, theme::CANVAS_BOTTOM);
 
-                    if theme::tab(ui, self.current_tab == AppTab::Workshop, "Workshop").clicked() {
-                        self.current_tab = AppTab::Workshop;
-                    }
-                });
-
-                ui.add_space(8.0);
-
-                match self.current_tab {
-                    AppTab::Mods => {
-                        ui.columns_const(|[info_column, disabled_column, active_column]| {
-                            let selected_mod = self
-                                .state
-                                .selected_mod_id
-                                .and_then(|mod_id| self.mods.get(mod_id));
-
-                            requested_open = show_mod_info(
-                                info_column,
-                                selected_mod,
-                                self.game_version.as_deref(),
-                            );
-
-                            let disabled_action = show_mod_list(
-                                disabled_column,
-                                ModListView {
-                                    kind: ModListKind::Disabled,
-                                    mods: &self.mods,
-                                    mod_ids: self.mods.disabled_ids(),
-                                    game_version: self.game_version.as_deref(),
-                                    order_warnings,
-                                    search_string: &mut self.state.search_strings.disabled_mods,
-                                    matcher: &mut self.state.fuzzy_matcher,
-                                    selected_mod_ids: &self.state.selected_mod_ids,
-                                    selection_anchor_id: self.state.selection_anchor_id,
-                                    selection_kind: self.state.selection_kind,
-                                },
-                            );
-
-                            let active_action = show_mod_list(
-                                active_column,
-                                ModListView {
-                                    kind: ModListKind::Enabled,
-                                    mods: &self.mods,
-                                    mod_ids: self.mods.enabled_ids(),
-                                    game_version: self.game_version.as_deref(),
-                                    order_warnings,
-                                    search_string: &mut self.state.search_strings.active_mods,
-                                    matcher: &mut self.state.fuzzy_matcher,
-                                    selected_mod_ids: &self.state.selected_mod_ids,
-                                    selection_anchor_id: self.state.selection_anchor_id,
-                                    selection_kind: self.state.selection_kind,
-                                },
-                            );
-
-                            if let Some(action) = disabled_action {
-                                self.apply_mod_list_action(action);
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(18, 10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if theme::tab(ui, self.current_tab == AppTab::Mods, "Mods").clicked() {
+                                self.current_tab = AppTab::Mods;
                             }
 
-                            if let Some(action) = active_action {
-                                self.apply_mod_list_action(action);
+                            if theme::tab(ui, self.current_tab == AppTab::Workshop, "Workshop")
+                                .clicked()
+                            {
+                                self.current_tab = AppTab::Workshop;
                             }
                         });
-                    }
-                    AppTab::Workshop => {
-                        self.ensure_covered_mods(ui.ctx());
 
-                        // Borrow only the coverage field so the view can still
-                        // mutably borrow the other WorkshopState fields.
-                        let covered_mods_state = match &self.workshop.covered_mods {
-                            CoveredModsStatus::Ready(covered_mods) => {
-                                CoveredModsState::Ready(covered_mods)
-                            }
-                            CoveredModsStatus::Failed(error) => {
-                                CoveredModsState::Failed(error.clone())
-                            }
-                            CoveredModsStatus::NotRequested | CoveredModsStatus::Loading(_) => {
-                                CoveredModsState::Loading
-                            }
-                        };
+                        ui.add_space(8.0);
 
-                        workshop_action = show_workshop(
-                            ui,
-                            WorkshopView {
-                                query: &mut self.workshop.query,
-                                sort: &mut self.workshop.sort,
-                                page: self.workshop.page,
-                                total: self.workshop.total,
-                                items: &self.workshop.items,
-                                load_status: &self.workshop.load_status,
-                                installing_items: &self.workshop.installing_items,
-                                selected_items: &self.workshop.selected_items,
-                                workshop_path: self.settings.workshop_path(),
-                                steamcmd_workshop_path: steamcmd_workshop_path.as_deref(),
-                                api_key_configured: self.settings.steam_web_api_key().is_some(),
-                                mods: &self.mods,
-                                game_version: self.game_version.as_deref(),
-                                covered_mods_state,
-                            },
-                        );
-                    }
-                }
+                        match self.current_tab {
+                            AppTab::Mods => {
+                                ui.columns_const(
+                                    |[info_column, disabled_column, active_column]| {
+                                        let selected_mod = self
+                                            .state
+                                            .selected_mod_id
+                                            .and_then(|mod_id| self.mods.get(mod_id));
+
+                                        requested_open = show_mod_info(
+                                            info_column,
+                                            selected_mod,
+                                            self.game_version.as_deref(),
+                                        );
+
+                                        let disabled_action = show_mod_list(
+                                            disabled_column,
+                                            ModListView {
+                                                kind: ModListKind::Disabled,
+                                                mods: &self.mods,
+                                                mod_ids: self.mods.disabled_ids(),
+                                                game_version: self.game_version.as_deref(),
+                                                order_warnings,
+                                                search_string: &mut self
+                                                    .state
+                                                    .search_strings
+                                                    .disabled_mods,
+                                                matcher: &mut self.state.fuzzy_matcher,
+                                                selected_mod_ids: &self.state.selected_mod_ids,
+                                                selection_anchor_id: self.state.selection_anchor_id,
+                                                selection_kind: self.state.selection_kind,
+                                            },
+                                        );
+
+                                        let active_action = show_mod_list(
+                                            active_column,
+                                            ModListView {
+                                                kind: ModListKind::Enabled,
+                                                mods: &self.mods,
+                                                mod_ids: self.mods.enabled_ids(),
+                                                game_version: self.game_version.as_deref(),
+                                                order_warnings,
+                                                search_string: &mut self
+                                                    .state
+                                                    .search_strings
+                                                    .active_mods,
+                                                matcher: &mut self.state.fuzzy_matcher,
+                                                selected_mod_ids: &self.state.selected_mod_ids,
+                                                selection_anchor_id: self.state.selection_anchor_id,
+                                                selection_kind: self.state.selection_kind,
+                                            },
+                                        );
+
+                                        if let Some(action) = disabled_action {
+                                            self.apply_mod_list_action(action);
+                                        }
+
+                                        if let Some(action) = active_action {
+                                            self.apply_mod_list_action(action);
+                                        }
+                                    },
+                                );
+                            }
+                            AppTab::Workshop => {
+                                self.ensure_workshop_started(ui.ctx());
+                                self.ensure_covered_mods(ui.ctx());
+
+                                // Borrow only the coverage field so the view can still
+                                // mutably borrow the other WorkshopState fields.
+                                let covered_mods_state = match &self.workshop.covered_mods {
+                                    CoveredModsStatus::Ready(covered_mods) => {
+                                        CoveredModsState::Ready(covered_mods)
+                                    }
+                                    CoveredModsStatus::Failed(error) => {
+                                        CoveredModsState::Failed(error.clone())
+                                    }
+                                    CoveredModsStatus::NotRequested
+                                    | CoveredModsStatus::Loading(_) => CoveredModsState::Loading,
+                                };
+
+                                workshop_action = show_workshop(
+                                    ui,
+                                    WorkshopView {
+                                        tab: self.workshop.tab,
+                                        query: &mut self.workshop.query,
+                                        subscribed_query: &mut self.workshop.subscribed_query,
+                                        sort: &mut self.workshop.sort,
+                                        subscribed_sort: &mut self.workshop.subscribed_sort,
+                                        versions: &mut self.workshop.versions,
+                                        dlc: &mut self.workshop.dlc,
+                                        my_version_only: &mut self.workshop.my_version_only,
+                                        page: self.workshop.page,
+                                        total: self.workshop.total,
+                                        items: &self.workshop.items,
+                                        load_status: &self.workshop.load_status,
+                                        installing_items: &self.workshop.installing_items,
+                                        workshop_path: self.settings.workshop_path(),
+                                        steamcmd_workshop_path: steamcmd_workshop_path.as_deref(),
+                                        steamcmd_available: workshop::steamcmd_available(
+                                            self.settings.steamcmd_path(),
+                                        ),
+                                        api_key_configured: self
+                                            .settings
+                                            .steam_web_api_key()
+                                            .is_some(),
+                                        mods: &self.mods,
+                                        game_version: self.game_version.as_deref(),
+                                        covered_mods_state,
+                                        subscribed_items: &self.workshop.subscribed_items,
+                                        subscribed_load_status: &self.workshop.subscribed_load,
+                                        subscribed_ids: self.workshop.subscriptions.ids(),
+                                        subscriptions_loading: matches!(
+                                            &self.workshop.subscriptions,
+                                            SubscriptionStatus::Loading
+                                        ),
+                                        subscriptions_error: self.workshop.subscriptions.error(),
+                                        pending_subscriptions: &self.workshop.pending_subscriptions,
+                                        subscribed_visible: self.workshop.subscribed_visible,
+                                        grid_generation: self.workshop.grid_generation,
+                                        subscribed_generation: self.workshop.subscribed_generation,
+                                        detail: self.workshop.detail.as_ref(),
+                                        detail_image: self.workshop.detail_image,
+                                    },
+                                );
+                            }
+                        }
+                    });
             });
 
         if let Some(target) = requested_open {
@@ -508,20 +543,55 @@ impl eframe::App for App {
         }
 
         match workshop_action {
-            Some(WorkshopAction::Search) => self.start_workshop_query(1, ui.ctx()),
-            Some(WorkshopAction::GoToPage(page)) => self.start_workshop_query(page, ui.ctx()),
-            Some(WorkshopAction::Install(published_file_ids)) => {
-                self.start_workshop_install(published_file_ids, ui.ctx());
+            Some(WorkshopAction::Search) => {
+                self.search_workshop(ui.ctx());
             }
-            Some(WorkshopAction::ToggleSelect(published_file_id)) => {
-                if !self.workshop.selected_items.remove(&published_file_id) {
-                    self.workshop.selected_items.insert(published_file_id);
+            Some(WorkshopAction::GoToPage(page)) => self.start_workshop_query(page, ui.ctx()),
+            Some(WorkshopAction::SwitchTab(tab)) => {
+                self.workshop.tab = tab;
+
+                if tab == WorkshopTab::Subscribed
+                    && matches!(
+                        &self.workshop.subscriptions,
+                        SubscriptionStatus::NotLoaded | SubscriptionStatus::Failed(_)
+                    )
+                {
+                    self.start_subscription_load(ui.ctx());
                 }
             }
-            Some(WorkshopAction::ClearSelection) => self.workshop.selected_items.clear(),
+            Some(WorkshopAction::Install(published_file_id)) => {
+                self.start_workshop_install(vec![published_file_id], ui.ctx());
+            }
+            Some(WorkshopAction::Subscribe(published_file_id)) => {
+                self.set_subscription(published_file_id, true, ui.ctx());
+            }
+            Some(WorkshopAction::Unsubscribe(published_file_id)) => {
+                self.set_subscription(published_file_id, false, ui.ctx());
+            }
+            Some(WorkshopAction::RefreshSubscriptions) => {
+                self.start_subscription_load(ui.ctx());
+            }
             Some(WorkshopAction::Open(target)) => self.open_target(target),
             Some(WorkshopAction::OpenSettings) => self.open_settings(),
             Some(WorkshopAction::RetryCoveredMods) => self.retry_covered_mods(ui.ctx()),
+            Some(WorkshopAction::OpenDetail(item)) => {
+                self.workshop.detail = Some(*item);
+                self.workshop.detail_image = None;
+            }
+            Some(WorkshopAction::CloseDetail) => {
+                self.workshop.detail = None;
+                self.workshop.detail_image = None;
+            }
+            Some(WorkshopAction::ShowImage(index)) => {
+                self.workshop.detail_image = Some(index);
+            }
+            Some(WorkshopAction::CloseImage) => {
+                self.workshop.detail_image = None;
+            }
+            Some(WorkshopAction::ShowMoreSubscribed) => {
+                self.workshop.subscribed_visible =
+                    self.workshop.subscribed_visible.saturating_add(60);
+            }
             None => {}
         }
 
