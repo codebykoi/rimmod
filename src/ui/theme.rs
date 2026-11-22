@@ -4,6 +4,7 @@
 //! scale, one spacing rhythm. UI code should not invent colors or sizes, so
 //! changes stay consistent across panels.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::{
@@ -146,7 +147,98 @@ fn fonts() -> FontDefinitions {
         vec!["inter-semibold".to_owned(), "inter".to_owned()],
     );
 
+    install_cjk_fonts(&mut fonts);
+
     fonts
+}
+
+/// Inter has no CJK coverage. Load a system CJK font as a fallback so Chinese
+/// and Japanese titles, descriptions and tags render instead of boxes.
+fn install_cjk_fonts(fonts: &mut FontDefinitions) {
+    let mut installed = 0;
+
+    for path in cjk_font_paths() {
+        if installed >= 2 {
+            break;
+        }
+
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+
+        let name = format!("cjk-{installed}");
+        fonts
+            .font_data
+            .insert(name.clone(), Arc::new(FontData::from_owned(bytes)));
+
+        if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
+            // Keep Inter first so Latin text uses the app font, then try CJK
+            // before the default emoji fallbacks.
+            proportional.insert(1 + installed, name.clone());
+        }
+
+        for family_name in ["medium", "semibold"] {
+            fonts
+                .families
+                .entry(family(family_name))
+                .or_default()
+                .push(name.clone());
+        }
+
+        installed += 1;
+    }
+}
+
+fn cjk_font_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(custom) = std::env::var_os("RIMMOD_CJK_FONT") {
+        paths.push(PathBuf::from(custom));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let fonts_folder = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("Fonts");
+
+        paths.extend([
+            fonts_folder.join("msyh.ttc"), // Microsoft YaHei (Chinese)
+            fonts_folder.join("msyh.ttf"),
+            fonts_folder.join("YuGothM.ttc"), // Yu Gothic (Japanese)
+            fonts_folder.join("YuGothM.ttf"),
+            fonts_folder.join("meiryo.ttc"), // Meiryo (Japanese)
+            fonts_folder.join("simhei.ttf"), // SimHei (Chinese)
+            fonts_folder.join("simsun.ttc"), // SimSun (Chinese)
+        ]);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        paths.extend([
+            PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+            PathBuf::from("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"),
+            PathBuf::from("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+            PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
+            PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+            PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+            PathBuf::from("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        paths.extend([
+            PathBuf::from("/System/Library/Fonts/PingFang.ttc"),
+            PathBuf::from("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+            PathBuf::from("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"),
+            PathBuf::from("/Library/Fonts/Arial Unicode.ttf"),
+        ]);
+    }
+
+    paths
 }
 
 // ---------------------------------------------------------------------------
