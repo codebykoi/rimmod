@@ -68,6 +68,29 @@ fn existing_mods_config_returns_normalized_active_ids() -> io::Result<()> {
 }
 
 #[test]
+fn explicit_package_ids_can_be_saved_before_mods_are_installed() -> io::Result<()> {
+    let test_directory = TestDirectory::new()?;
+    let config_file = test_directory.path.join("ModsConfig.xml");
+    let original_xml = "<ModsConfigData><activeMods></activeMods></ModsConfigData>";
+    fs::write(&config_file, original_xml)?;
+
+    let package_ids = [
+        PackageId::new("ludeon.rimworld").expect("valid package ID"),
+        PackageId::new("sbz.bookcase").expect("valid package ID"),
+    ];
+
+    let outcome = save_load_order_package_ids(&test_directory.path, &package_ids)?;
+
+    let saved_ids = parse_config(&test_directory.path)?;
+    let saved_id_text = saved_ids.iter().map(PackageId::as_str).collect::<Vec<_>>();
+
+    assert_eq!(saved_id_text, ["ludeon.rimworld", "sbz.bookcase"]);
+    assert_eq!(fs::read_to_string(&outcome.backup_path)?, original_xml);
+
+    Ok(())
+}
+
+#[test]
 fn successful_save_creates_a_recoverable_backup() -> io::Result<()> {
     let test_directory = TestDirectory::new()?;
     let config_file = test_directory.path.join("ModsConfig.xml");

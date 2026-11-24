@@ -211,13 +211,28 @@ where
         .iter()
         .map(|&index| {
             mods.get(index)
-                .map(|rimworld_mod| rimworld_mod.package_id.as_str())
+                .map(|rimworld_mod| rimworld_mod.package_id.clone())
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "active mod index is invalid")
                 })
         })
         .collect::<io::Result<Vec<_>>>()?;
 
+    save_package_ids_with_replace(config_folder, &active_package_ids, replace_config)
+}
+
+fn save_package_ids_with_replace<F>(
+    config_folder: &Path,
+    package_ids: &[PackageId],
+    replace_config: F,
+) -> io::Result<SaveLoadOrderOutcome>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    let active_package_ids = package_ids
+        .iter()
+        .map(PackageId::as_str)
+        .collect::<Vec<_>>();
     let config_file = config_folder.join("ModsConfig.xml");
     let original_xml = fs::read_to_string(&config_file)
         .map_err(|error| path_error("could not read configuration", &config_file, error))?;
@@ -254,6 +269,18 @@ where
 
     Ok(SaveLoadOrderOutcome {
         backup_path: backup_file,
+    })
+}
+
+/// Save an explicit package-ID list, including IDs that are not installed yet.
+/// Used by modpacks so newly subscribed Workshop mods can be queued in the
+/// load order before Steam finishes downloading them.
+pub(crate) fn save_load_order_package_ids(
+    config_folder: &Path,
+    package_ids: &[PackageId],
+) -> io::Result<SaveLoadOrderOutcome> {
+    save_package_ids_with_replace(config_folder, package_ids, |temporary_file, config_file| {
+        fs::rename(temporary_file, config_file)
     })
 }
 
