@@ -61,3 +61,60 @@ fn entries_before_any_version_heading_are_ignored() {
     assert!(!covered.contains_key(&7));
     assert!(covered.contains_key(&42));
 }
+
+#[test]
+fn mod_ids_to_fix_fills_in_versions_missing_from_mods_md_headings() {
+    let markdown = "\
+## 1.6
+- [Marios Pizza](https://steamcommunity.com/sharedfiles/filedetails/?id=3226188356)
+## 1.3
+- [Marios Pizza](https://steamcommunity.com/sharedfiles/filedetails/?id=3226188356)
+";
+    let xml = "\
+\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<ModIdsToFix>
+  <!-- Marios Pizza -->
+  <li>Sov.Pizza</li>
+</ModIdsToFix>
+";
+
+    let (mut covered, name_index, headings) = parse_covered_mods_with_names(markdown);
+    merge_mod_ids_to_fix(&mut covered, &name_index, "1.7", xml);
+
+    assert_eq!(
+        versions_to_cross_check(&headings, Some("1.6.4211")),
+        vec!["1.7".to_owned(), "1.6".to_owned()]
+    );
+    assert_eq!(
+        covered.get(&3226188356),
+        Some(&vec!["1.6".to_owned(), "1.3".to_owned(), "1.7".to_owned()])
+    );
+}
+
+#[test]
+fn mod_ids_to_fix_handles_brackets_in_names_and_skips_ambiguous_names() {
+    let markdown = "\
+## 1.6
+- [[KV] Hand 'n' Footwear [Adopted]](https://steamcommunity.com/sharedfiles/filedetails/?id=3266890815)
+- [Wheelchairs](https://steamcommunity.com/sharedfiles/filedetails/?id=100)
+- [Wheelchairs](https://steamcommunity.com/sharedfiles/filedetails/?id=200)
+";
+    let xml = "\
+<ModIdsToFix>
+  <!-- [KV] Hand 'n' Footwear [Adopted] -->
+  <li>handandfootwearcontinued.kv.rw</li>
+  <!-- Wheelchairs -->
+  <li>example.wheelchairs</li>
+</ModIdsToFix>
+";
+
+    let (mut covered, name_index, _) = parse_covered_mods_with_names(markdown);
+    merge_mod_ids_to_fix(&mut covered, &name_index, "1.7", xml);
+
+    assert_eq!(
+        covered.get(&3266890815),
+        Some(&vec!["1.6".to_owned(), "1.7".to_owned()])
+    );
+    assert_eq!(covered.get(&100), Some(&vec!["1.6".to_owned()]));
+    assert_eq!(covered.get(&200), Some(&vec!["1.6".to_owned()]));
+}

@@ -19,6 +19,12 @@ fn test_mod(package: &str) -> RimworldMod {
         community_supported_versions: Vec::new(),
         loader_after: Vec::new(),
         loader_before: Vec::new(),
+        force_load_after: Vec::new(),
+        force_load_before: Vec::new(),
+        mod_dependencies: Vec::new(),
+        incompatible_with: Vec::new(),
+        inferred_after: Vec::new(),
+        is_patch_only: false,
         folder: PathBuf::new(),
         source: ModSource::Local,
         mod_type: ModType::Xml,
@@ -203,4 +209,25 @@ fn highest_supported_version_compares_major_minor_numerically() {
         highest_supported_version(&versions(&["not a version"])),
         None
     );
+}
+
+#[test]
+fn newest_known_version_picks_newer_community_reports_and_prefers_official_on_ties() {
+    assert_eq!(
+        newest_known_version(&versions(&["1.5"]), &versions(&["1.6"])),
+        Some(("1.6", true))
+    );
+    assert_eq!(
+        newest_known_version(&versions(&["1.6"]), &versions(&["1.6"])),
+        Some(("1.6", false))
+    );
+    assert_eq!(
+        newest_known_version(&versions(&["1.6"]), &versions(&["1.5"])),
+        Some(("1.6", false))
+    );
+    assert_eq!(
+        newest_known_version(&versions(&[]), &versions(&["1.5", "1.6"])),
+        Some(("1.6", true))
+    );
+    assert_eq!(newest_known_version(&versions(&[]), &versions(&[])), None);
 }
