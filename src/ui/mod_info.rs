@@ -307,25 +307,28 @@ fn show_dependency_hints(ui: &mut egui::Ui, rimworld_mod: &RimworldMod, mods: &M
         .chunk_by(|left, right| left.package_id == right.package_id)
         .count();
 
-    let mut header = String::from("Dependencies");
+    let mut details = Vec::new();
 
     if !rimworld_mod.mod_dependencies.is_empty() {
-        header.push_str(&format!(
-            " · {} required",
-            rimworld_mod.mod_dependencies.len()
-        ));
+        details.push(format!("{} required", rimworld_mod.mod_dependencies.len()));
     }
 
     if inferred_groups > 0 {
-        header.push_str(&format!(" · {inferred_groups} inferred"));
+        details.push(format!("{inferred_groups} inferred"));
     }
 
     if !rimworld_mod.incompatible_with.is_empty() {
-        header.push_str(&format!(
-            " · {} incompatible",
+        details.push(format!(
+            "{} incompatible",
             rimworld_mod.incompatible_with.len()
         ));
     }
+
+    let header = if details.is_empty() {
+        String::from("Dependencies")
+    } else {
+        format!("Dependencies ({})", details.join(", "))
+    };
 
     ui.add_space(6.0);
 

@@ -16,6 +16,8 @@
 //! between machines. Steam Workshop mods are stored as IDs in the manifest
 //! instead of files, keeping archives compact.
 
+pub(crate) mod diff;
+
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, Write};
@@ -28,6 +30,11 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::services::organization::{MAX_TAG_CHARS, ModColor};
+
+pub(crate) use self::diff::{
+    DiffMod, PackDiff, PackStatus, compute_pack_diff, compute_pack_status,
+    format_mod_list_for_share,
+};
 
 pub(crate) const PACK_EXTENSION: &str = "rimpack";
 pub(crate) const PACK_FORMAT: &str = "rimmod.modpack";
@@ -161,6 +168,25 @@ pub(crate) struct PackSummary {
     pub(crate) path: PathBuf,
     pub(crate) manifest: ModpackManifest,
     pub(crate) icon: Option<Arc<[u8]>>,
+    pub(crate) size_bytes: u64,
+}
+
+/// Options controlling which non-mod files are copied when applying a pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackApplyOptions {
+    pub(crate) restore_configs: bool,
+    pub(crate) restore_saves: bool,
+    pub(crate) overwrite_saves: bool,
+}
+
+impl Default for PackApplyOptions {
+    fn default() -> Self {
+        Self {
+            restore_configs: true,
+            restore_saves: true,
+            overwrite_saves: false,
+        }
+    }
 }
 
 /// Files selected for one save/update operation.
@@ -194,6 +220,17 @@ pub(crate) fn is_pack_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case(PACK_EXTENSION))
+}
+
+pub(crate) fn is_supported_icon_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif"
+            )
+        })
 }
 
 /// Read every instance in the library. Legacy loose `.rimpack` files are
@@ -246,11 +283,13 @@ pub(crate) fn list_library() -> io::Result<Vec<PackSummary>> {
         let Ok(pack) = read_instance(&path) else {
             continue;
         };
+        let size_bytes = directory_size(&path);
 
         packs.push(PackSummary {
             path,
             manifest: pack.manifest,
             icon: pack.icon,
+            size_bytes,
         });
     }
 
@@ -294,6 +333,18 @@ pub(crate) fn read_instance(path: &Path) -> io::Result<LoadedPack> {
     Ok(LoadedPack { manifest, icon })
 }
 
+pub(crate) fn read_instance_summary(path: &Path) -> io::Result<PackSummary> {
+    let loaded = read_instance(path)?;
+    let size_bytes = directory_size(path);
+
+    Ok(PackSummary {
+        path: path.to_path_buf(),
+        manifest: loaded.manifest,
+        icon: loaded.icon,
+        size_bytes,
+    })
+}
+
 pub(crate) fn read_archive_manifest(path: &Path) -> io::Result<ModpackManifest> {
     let file =
         File::open(path).map_err(|error| path_error("could not open modpack", path, error))?;
@@ -301,6 +352,140 @@ pub(crate) fn read_archive_manifest(path: &Path) -> io::Result<ModpackManifest> 
         .map_err(|error| zip_error("could not read modpack", path, error))?;
 
     read_manifest_from_archive(&mut archive, path)
+}
+
+/// Read both manifest and optional icon from a `.rimpack` archive without
+/// extracting its contents, for drag-and-drop and import previews.
+pub(crate) fn read_archive_preview(path: &Path) -> io::Result<LoadedPack> {
+    let file =
+        File::open(path).map_err(|error| path_error("could not open modpack", path, error))?;
+    let mut archive = ZipArchive::new(BufReader::new(file))
+        .map_err(|error| zip_error("could not read modpack", path, error))?;
+
+    let manifest = read_manifest_from_archive(&mut archive, path)?;
+    let icon = match archive.by_name(ICON_NAME) {
+        Ok(mut entry) => {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            Some(Arc::from(bytes))
+        }
+        Err(_) => None,
+    };
+
+    Ok(LoadedPack { manifest, icon })
+}
+
+/// Local mod folders currently bundled inside an existing library instance.
+pub(crate) fn instance_local_mods(
+    instance: &Path,
+    manifest: &ModpackManifest,
+) -> Vec<(String, PathBuf)> {
+    manifest
+        .mods
+        .iter()
+        .filter(|pack_mod| pack_mod.is_local())
+        .filter_map(|pack_mod| {
+            let folder_name = sanitize_component(&pack_mod.folder_name);
+            let source = instance.join(MODS_PREFIX).join(&folder_name);
+            source.is_dir().then_some((folder_name, source))
+        })
+        .collect()
+}
+
+/// Mod settings files currently bundled inside an existing library instance.
+pub(crate) fn instance_configs(
+    instance: &Path,
+    manifest: &ModpackManifest,
+) -> Vec<(String, PathBuf)> {
+    manifest
+        .configs
+        .iter()
+        .filter_map(|relative_path| {
+            let safe_path = safe_relative_path(relative_path)?;
+            let source = instance.join(CONFIGS_PREFIX).join(safe_path);
+            source.is_file().then_some((relative_path.clone(), source))
+        })
+        .collect()
+}
+
+/// Save files currently bundled inside an existing library instance.
+pub(crate) fn instance_saves(
+    instance: &Path,
+    manifest: &ModpackManifest,
+) -> Vec<(String, PathBuf)> {
+    manifest
+        .saves
+        .iter()
+        .filter_map(|file_name| {
+            let safe_name = safe_file_name(file_name)?;
+            let source = instance.join(SAVES_PREFIX).join(&safe_name);
+            source.is_file().then_some((safe_name, source))
+        })
+        .collect()
+}
+
+/// Duplicate an existing instance folder under a new name.
+pub(crate) fn duplicate_instance(
+    source: &Path,
+    destination: &Path,
+    new_name: &str,
+) -> io::Result<PackSummary> {
+    let loaded = read_instance(source)?;
+    let mut manifest = loaded.manifest;
+    manifest.name = new_name
+        .trim()
+        .chars()
+        .take(MAX_PACK_NAME_CHARS)
+        .collect::<String>();
+    manifest.created_at = unix_now();
+
+    let local_mods = instance_local_mods(source, &manifest);
+    let configs = instance_configs(source, &manifest);
+    let saves = instance_saves(source, &manifest);
+
+    write_instance(
+        destination,
+        PackWriteRequest {
+            manifest: &manifest,
+            icon: loaded.icon.as_deref(),
+            local_mods: &local_mods,
+            configs: &configs,
+            saves: &saves,
+        },
+        &mut |_| {},
+    )?;
+
+    read_instance_summary(destination)
+}
+
+/// Total size in bytes of all files stored inside an instance directory.
+pub(crate) fn directory_size(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file()
+                && let Ok(metadata) = entry.metadata()
+            {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+
+    total
 }
 
 fn read_manifest_from_archive<R: Read + Seek>(
@@ -636,12 +821,36 @@ fn import_archive_inner(
 }
 
 /// Copy an instance's selected files into RimWorld's folders.
+#[cfg(test)]
 pub(crate) fn apply_instance(
     instance: &Path,
     mods_root: &Path,
     config_root: &Path,
     saves_root: &Path,
     overwrite_saves: bool,
+    progress: ProgressCallback<'_>,
+) -> io::Result<AppliedPack> {
+    apply_instance_with_options(
+        instance,
+        mods_root,
+        config_root,
+        saves_root,
+        PackApplyOptions {
+            restore_configs: true,
+            restore_saves: true,
+            overwrite_saves,
+        },
+        progress,
+    )
+}
+
+/// Copy an instance's files into RimWorld's folders according to `options`.
+pub(crate) fn apply_instance_with_options(
+    instance: &Path,
+    mods_root: &Path,
+    config_root: &Path,
+    saves_root: &Path,
+    options: PackApplyOptions,
     progress: ProgressCallback<'_>,
 ) -> io::Result<AppliedPack> {
     let loaded = read_instance(instance)?;
@@ -681,37 +890,41 @@ pub(crate) fn apply_instance(
         }
     }
 
-    for relative_path in &manifest.configs {
-        let Some(safe_path) = safe_relative_path(relative_path) else {
-            continue;
-        };
-        let source = instance.join(CONFIGS_PREFIX).join(&safe_path);
+    if options.restore_configs {
+        for relative_path in &manifest.configs {
+            let Some(safe_path) = safe_relative_path(relative_path) else {
+                continue;
+            };
+            let source = instance.join(CONFIGS_PREFIX).join(&safe_path);
 
-        if source.is_file() {
-            total += 1;
-            config_files.push((relative_path.clone(), source, config_root.join(&safe_path)));
+            if source.is_file() {
+                total += 1;
+                config_files.push((relative_path.clone(), source, config_root.join(&safe_path)));
+            }
         }
     }
 
-    for file_name in &manifest.saves {
-        let Some(file_name) = safe_file_name(file_name) else {
-            continue;
-        };
-        let source = instance.join(SAVES_PREFIX).join(&file_name);
+    if options.restore_saves {
+        for file_name in &manifest.saves {
+            let Some(file_name) = safe_file_name(file_name) else {
+                continue;
+            };
+            let source = instance.join(SAVES_PREFIX).join(&file_name);
 
-        if !source.is_file() {
-            continue;
+            if !source.is_file() {
+                continue;
+            }
+
+            let target = saves_root.join(&file_name);
+
+            if target.exists() && !options.overwrite_saves {
+                skipped_saves.insert(file_name);
+                continue;
+            }
+
+            total += 1;
+            save_files.push((file_name, source, target));
         }
-
-        let target = saves_root.join(&file_name);
-
-        if target.exists() && !overwrite_saves {
-            skipped_saves.insert(file_name);
-            continue;
-        }
-
-        total += 1;
-        save_files.push((file_name, source, target));
     }
 
     let mut done = 0;

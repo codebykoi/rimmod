@@ -939,7 +939,7 @@ pub(crate) fn show_drag_ghost(context: &egui::Context, mods: &ModCollection) {
     let label = if count == 1 {
         first_name.to_owned()
     } else {
-        format!("{count} mods · {first_name}")
+        format!("{count} mods - {first_name}")
     };
 
     let appear = context.animate_bool_with_time(egui::Id::new("mod_drag_ghost_appear"), true, 0.12);

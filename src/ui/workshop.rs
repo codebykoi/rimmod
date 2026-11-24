@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Sense, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::models::{
     ModCollection, ModSource, RimworldMod, major_minor_version_text, newest_known_version,
@@ -69,7 +69,10 @@ pub(crate) struct WorkshopView<'a> {
     pub(crate) versions: &'a mut Vec<String>,
     pub(crate) dlc: &'a mut Vec<String>,
     pub(crate) my_version_only: &'a mut bool,
+    pub(crate) hide_subscribed: &'a mut bool,
+    pub(crate) not_installed_only: &'a mut bool,
     pub(crate) page: u32,
+    pub(crate) subscribed_page: &'a mut u32,
     pub(crate) total: u64,
     pub(crate) items: &'a [WorkshopItem],
     pub(crate) load_status: &'a WorkshopLoadStatus,
@@ -87,7 +90,6 @@ pub(crate) struct WorkshopView<'a> {
     pub(crate) subscriptions_loading: bool,
     pub(crate) subscriptions_error: Option<&'a str>,
     pub(crate) pending_subscriptions: &'a HashSet<u64>,
-    pub(crate) subscribed_visible: usize,
     pub(crate) grid_generation: u64,
     pub(crate) subscribed_generation: u64,
     pub(crate) detail: Option<&'a WorkshopItem>,
@@ -102,7 +104,6 @@ pub(crate) enum WorkshopAction {
     Subscribe(u64),
     Unsubscribe(u64),
     RefreshSubscriptions,
-    ShowMoreSubscribed,
     Open(OpenTarget),
     OpenSettings,
     RetryCoveredMods,
@@ -110,6 +111,7 @@ pub(crate) enum WorkshopAction {
     CloseDetail,
     ShowImage(usize),
     CloseImage,
+    Copy { text: String, label: &'static str },
 }
 
 /// Everything a card or the detail window needs to describe one item.
@@ -155,6 +157,9 @@ struct SidebarState<'a> {
     versions: &'a mut Vec<String>,
     dlc: &'a mut Vec<String>,
     my_version_only: &'a mut bool,
+    hide_subscribed: &'a mut bool,
+    not_installed_only: &'a mut bool,
+    has_subscribed_ids: bool,
     game_version: Option<&'a str>,
     subscribed_count: usize,
     subscriptions_loading: bool,
@@ -165,7 +170,10 @@ struct SidebarState<'a> {
 
 #[derive(Default)]
 struct SidebarOutcome {
-    filters_changed: bool,
+    /// Server-side query filters changed (Browse needs a fresh API search).
+    query_filters_changed: bool,
+    /// Any filter affecting the Subscribed list changed (reset to page 1).
+    local_filters_changed: bool,
     retry_covered_mods: bool,
 }
 
@@ -179,7 +187,10 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
         versions,
         dlc,
         my_version_only,
+        hide_subscribed,
+        not_installed_only,
         page,
+        subscribed_page,
         total,
         items,
         load_status,
@@ -197,7 +208,6 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
         subscriptions_loading,
         subscriptions_error,
         pending_subscriptions,
-        subscribed_visible,
         grid_generation,
         subscribed_generation,
         detail,
@@ -254,7 +264,7 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
 
     match tab {
         WorkshopTab::Browse => {
-            show_browse_header(ui, load_status);
+            show_browse_header(ui, load_status, total);
 
             let query_is_empty = query.trim().is_empty();
             let (enter_pressed, (sort_changed, clear_clicked, search_clicked)) =
@@ -342,6 +352,7 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                 versions,
                 dlc,
                 my_version_only,
+                (hide_subscribed, "Hide subscribed"),
                 &mut action,
             );
             ui.add_space(6.0);
@@ -364,6 +375,9 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                         versions,
                                         dlc,
                                         my_version_only,
+                                        hide_subscribed,
+                                        not_installed_only,
+                                        has_subscribed_ids: subscribed_ids.is_some(),
                                         game_version,
                                         subscribed_count: subscribed_items.len(),
                                         subscriptions_loading,
@@ -373,7 +387,7 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                     },
                                 );
 
-                                if outcome.filters_changed {
+                                if outcome.query_filters_changed {
                                     action = Some(WorkshopAction::Search);
                                 }
 
@@ -390,7 +404,16 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                     Vec2::new(ui.available_width(), body_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        let cards = items.iter().collect::<Vec<_>>();
+                        let cards = items
+                            .iter()
+                            .filter(|item| {
+                                !*hide_subscribed
+                                    || !item_context.is_subscribed(item.published_file_id)
+                            })
+                            .collect::<Vec<_>>();
+                        let empty_override =
+                            (*hide_subscribed && cards.is_empty() && !items.is_empty())
+                                .then_some("All items on this page are already subscribed.");
 
                         if let Some(grid_action) = show_grid(
                             ui,
@@ -400,6 +423,7 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                             Some((page, total, api_key_configured)),
                             load_status,
                             WorkshopAction::Search,
+                            empty_override,
                         ) {
                             action = Some(grid_action);
                         }
@@ -415,23 +439,36 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                 versions,
                 dlc,
                 *my_version_only,
+                *not_installed_only,
                 game_version,
+                workshop_path,
+                steamcmd_workshop_path,
             );
 
             let total_matches = cards.len();
-            let shown = total_matches.min(subscribed_visible);
+            show_subscribed_header(ui, total_matches, subscribed_items.len());
 
-            ui.label(RichText::new("Your subscriptions").text_style(theme::strong_style()));
-
-            egui::containers::Sides::new()
+            let query_is_empty = subscribed_query.trim().is_empty();
+            let (query_changed, (sort_changed, clear_clicked)) = egui::containers::Sides::new()
                 .shrink_left()
                 .height(theme::CONTROL_HEIGHT)
                 .show(
                     ui,
                     |ui| {
-                        theme::search_field(ui, subscribed_query, "Filter your subscriptions");
+                        let search =
+                            theme::search_field(ui, subscribed_query, "Filter your subscriptions");
+
+                        if !ui.ctx().egui_wants_keyboard_input()
+                            && ui.input(|input| input.key_pressed(egui::Key::Slash))
+                        {
+                            search.request_focus();
+                        }
+
+                        search.changed()
                     },
                     |ui| {
+                        let previous_sort = *subscribed_sort;
+
                         egui::ComboBox::from_id_salt("subscribed_sort")
                             .selected_text(subscribed_sort.label())
                             .width(150.0)
@@ -444,6 +481,16 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                     );
                                 }
                             });
+
+                        let sort_changed = *subscribed_sort != previous_sort;
+
+                        let clear_clicked = !query_is_empty
+                            && theme::secondary_button_sized(
+                                ui,
+                                "Clear",
+                                Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                            )
+                            .clicked();
 
                         let refresh = ui
                             .add_enabled_ui(!subscriptions_loading, |ui| {
@@ -458,18 +505,31 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                         if refresh.clicked() {
                             action = Some(WorkshopAction::RefreshSubscriptions);
                         }
+
+                        (sort_changed, clear_clicked)
                     },
                 );
 
-            show_active_filters(
+            if clear_clicked {
+                subscribed_query.clear();
+            }
+
+            if query_changed || sort_changed || clear_clicked {
+                *subscribed_page = 1;
+            }
+
+            if show_active_filters(
                 ui,
                 WorkshopTab::Subscribed,
                 subscribed_query,
                 versions,
                 dlc,
                 my_version_only,
+                (not_installed_only, "Not installed"),
                 &mut action,
-            );
+            ) {
+                *subscribed_page = 1;
+            }
             ui.add_space(6.0);
 
             let body_height = ui.available_height().max(220.0);
@@ -490,6 +550,9 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                         versions,
                                         dlc,
                                         my_version_only,
+                                        hide_subscribed,
+                                        not_installed_only,
+                                        has_subscribed_ids: subscribed_ids.is_some(),
                                         game_version,
                                         subscribed_count: subscribed_items.len(),
                                         subscriptions_loading,
@@ -498,6 +561,10 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                         covered_mods_state: &covered_mods_state,
                                     },
                                 );
+
+                                if outcome.local_filters_changed {
+                                    *subscribed_page = 1;
+                                }
 
                                 if outcome.retry_covered_mods {
                                     action = Some(WorkshopAction::RetryCoveredMods);
@@ -512,21 +579,6 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                     Vec2::new(ui.available_width(), body_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        if shown < total_matches {
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .button(format!(
-                                        "Show {} more",
-                                        (total_matches - shown).min(60)
-                                    ))
-                                    .clicked()
-                                {
-                                    action = Some(WorkshopAction::ShowMoreSubscribed);
-                                }
-                            });
-                            ui.add_space(4.0);
-                        }
-
                         if subscribed_items.is_empty()
                             && matches!(subscribed_load_status, WorkshopLoadStatus::Ready)
                         {
@@ -546,21 +598,33 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                     action = Some(WorkshopAction::SwitchTab(WorkshopTab::Browse));
                                 }
                             });
-                        } else if let Some(grid_action) = show_grid(
-                            ui,
-                            &cards[..shown],
-                            &item_context,
-                            (
-                                "subscribed_grid",
-                                *subscribed_sort,
-                                subscribed_query.as_str(),
-                                subscribed_generation,
-                            ),
-                            None,
-                            subscribed_load_status,
-                            WorkshopAction::RefreshSubscriptions,
-                        ) {
-                            action = Some(grid_action);
+                        } else {
+                            let page_count =
+                                (total_matches as u64).div_ceil(ITEMS_PER_PAGE).max(1) as u32;
+                            *subscribed_page = (*subscribed_page).clamp(1, page_count);
+                            let per_page = ITEMS_PER_PAGE as usize;
+                            let start = ((*subscribed_page - 1) as usize) * per_page;
+                            let end = (start + per_page).min(total_matches);
+                            let page_cards = &cards[start..end];
+
+                            if let Some(grid_action) = show_grid(
+                                ui,
+                                page_cards,
+                                &item_context,
+                                (
+                                    "subscribed_grid",
+                                    *subscribed_page,
+                                    *subscribed_sort,
+                                    subscribed_query.as_str(),
+                                    subscribed_generation,
+                                ),
+                                Some((*subscribed_page, total_matches as u64, true)),
+                                subscribed_load_status,
+                                WorkshopAction::RefreshSubscriptions,
+                                None,
+                            ) {
+                                action = Some(grid_action);
+                            }
                         }
                     },
                 );
@@ -584,6 +648,20 @@ fn apply_workshop_style(ui: &mut egui::Ui) {
 
 fn chip(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) -> egui::Response {
     theme::chip_with_corner_radius(ui, text, color, CornerRadius::ZERO)
+}
+
+fn format_number(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(ch);
+    }
+
+    formatted.chars().rev().collect()
 }
 
 fn show_key_notice(ui: &mut egui::Ui, api_key_configured: bool) -> Option<WorkshopAction> {
@@ -631,9 +709,14 @@ fn show_key_notice(ui: &mut egui::Ui, api_key_configured: bool) -> Option<Worksh
     action
 }
 
-fn show_browse_header(ui: &mut egui::Ui, load_status: &WorkshopLoadStatus) {
+fn show_browse_header(ui: &mut egui::Ui, load_status: &WorkshopLoadStatus, total: u64) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Browsing: Items").text_style(theme::strong_style()));
+
+        if matches!(load_status, WorkshopLoadStatus::Ready) {
+            let noun = if total == 1 { "result" } else { "results" };
+            theme::hint(ui, format!("{} {noun}", format_number(total)));
+        }
 
         if matches!(load_status, WorkshopLoadStatus::Loading) {
             ui.add(egui::Spinner::new().size(14.0));
@@ -641,6 +724,27 @@ fn show_browse_header(ui: &mut egui::Ui, load_status: &WorkshopLoadStatus) {
     });
 }
 
+fn show_subscribed_header(ui: &mut egui::Ui, matches: usize, total: usize) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Your subscriptions").text_style(theme::strong_style()));
+
+        if total > 0 {
+            let summary = if matches == total {
+                let noun = if total == 1 { "item" } else { "items" };
+                format!("{} {noun}", format_number(total as u64))
+            } else {
+                format!(
+                    "{} of {}",
+                    format_number(matches as u64),
+                    format_number(total as u64)
+                )
+            };
+            theme::hint(ui, summary);
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn show_active_filters(
     ui: &mut egui::Ui,
     tab: WorkshopTab,
@@ -648,11 +752,21 @@ fn show_active_filters(
     versions: &mut Vec<String>,
     dlc: &mut Vec<String>,
     my_version_only: &mut bool,
+    extra_flag: (&mut bool, &str),
     action: &mut Option<WorkshopAction>,
-) {
-    if query.trim().is_empty() && versions.is_empty() && dlc.is_empty() && !*my_version_only {
-        return;
+) -> bool {
+    let (extra_value, extra_label) = extra_flag;
+
+    if query.trim().is_empty()
+        && versions.is_empty()
+        && dlc.is_empty()
+        && !*my_version_only
+        && !*extra_value
+    {
+        return false;
     }
+
+    let mut changed = false;
 
     let search = |action: &mut Option<WorkshopAction>| {
         if tab == WorkshopTab::Browse {
@@ -669,17 +783,25 @@ fn show_active_filters(
         {
             query.clear();
             search(action);
+            changed = true;
         }
 
         if *my_version_only && removable_chip(ui, "My game version").clicked() {
             *my_version_only = false;
             search(action);
+            changed = true;
+        }
+
+        if *extra_value && removable_chip(ui, extra_label).clicked() {
+            *extra_value = false;
+            changed = true;
         }
 
         for version in versions.clone() {
             if removable_chip(ui, &version).clicked() {
                 versions.retain(|candidate| candidate != &version);
                 search(action);
+                changed = true;
             }
         }
 
@@ -687,17 +809,28 @@ fn show_active_filters(
             if removable_chip(ui, &dlc_tag).clicked() {
                 dlc.retain(|candidate| candidate != &dlc_tag);
                 search(action);
+                changed = true;
             }
         }
 
         if ui.link("Clear all").clicked() {
+            let had_query_filters = !query.trim().is_empty()
+                || !versions.is_empty()
+                || !dlc.is_empty()
+                || *my_version_only;
             query.clear();
             versions.clear();
             dlc.clear();
             *my_version_only = false;
-            search(action);
+            *extra_value = false;
+            if had_query_filters {
+                search(action);
+            }
+            changed = true;
         }
     });
+
+    changed
 }
 
 fn removable_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
@@ -727,6 +860,9 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
         versions,
         dlc,
         my_version_only,
+        hide_subscribed,
+        not_installed_only,
+        has_subscribed_ids,
         game_version,
         subscribed_count,
         subscriptions_loading,
@@ -743,14 +879,24 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
         ui.label(RichText::new("Filters").small().color(theme::TEXT_FAINT));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let has_filters = !versions.is_empty() || !dlc.is_empty() || *my_version_only;
+            let tab_flag_active = match tab {
+                WorkshopTab::Browse => *hide_subscribed,
+                WorkshopTab::Subscribed => *not_installed_only,
+            };
+            let has_query_filters = !versions.is_empty() || !dlc.is_empty() || *my_version_only;
+            let has_filters = has_query_filters || tab_flag_active;
 
             if has_filters {
                 if theme::link(ui, "Reset").clicked() {
                     versions.clear();
                     dlc.clear();
                     *my_version_only = false;
-                    outcome.filters_changed = true;
+                    match tab {
+                        WorkshopTab::Browse => *hide_subscribed = false,
+                        WorkshopTab::Subscribed => *not_installed_only = false,
+                    }
+                    outcome.query_filters_changed = has_query_filters;
+                    outcome.local_filters_changed = true;
                 }
             } else {
                 theme::hint(ui, "Reset");
@@ -775,7 +921,29 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
         .changed()
     {
         *my_version_only = my_version;
-        outcome.filters_changed = true;
+        outcome.query_filters_changed = true;
+        outcome.local_filters_changed = true;
+    }
+
+    match tab {
+        WorkshopTab::Browse => {
+            let mut hide = *hide_subscribed;
+            if ui
+                .add_enabled(
+                    has_subscribed_ids,
+                    theme::Checkbox::new(&mut hide, "Hide subscribed"),
+                )
+                .on_disabled_hover_text("Subscriptions have not loaded yet")
+                .changed()
+            {
+                *hide_subscribed = hide;
+            }
+        }
+        WorkshopTab::Subscribed => {
+            if theme::checkbox(ui, not_installed_only, "Not installed only").changed() {
+                outcome.local_filters_changed = true;
+            }
+        }
     }
 
     ui.add_space(4.0);
@@ -786,7 +954,8 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
 
             if theme::checkbox(ui, &mut selected, *version).changed() {
                 toggle_value(versions, version);
-                outcome.filters_changed = true;
+                outcome.query_filters_changed = true;
+                outcome.local_filters_changed = true;
             }
         }
     });
@@ -797,28 +966,15 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
 
             if theme::checkbox(ui, &mut selected, *dlc_tag).changed() {
                 toggle_value(dlc, dlc_tag);
-                outcome.filters_changed = true;
+                outcome.query_filters_changed = true;
+                outcome.local_filters_changed = true;
             }
         }
     });
 
-    if tab == WorkshopTab::Subscribed {
-        theme::hint(
-            ui,
-            "Version and DLC filters apply to the subscriptions already loaded.",
-        );
-    }
-
-    ui.add_space(8.0);
-    ui.separator();
     ui.add_space(6.0);
-
-    ui.label(
-        RichText::new("STEAM STATUS")
-            .font(theme::semibold_font(11.0))
-            .color(theme::TEXT_FAINT),
-    );
-    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(4.0);
 
     let (steam_color, steam_hover) = if subscriptions_loading {
         (theme::TEXT_MUTED, "Loading your Steam subscriptions…")
@@ -827,16 +983,19 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
     } else if subscribed_count == 0 {
         (theme::TEXT_MUTED, "No Workshop subscriptions found")
     } else {
-        (theme::SUCCESS, "Subscriptions loaded")
+        (theme::SUCCESS, "Steam subscriptions loaded")
     };
 
-    ui.horizontal_wrapped(|ui| {
-        chip(ui, "Steam", steam_color).on_hover_text(steam_hover);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+
+        status_indicator(ui, "Steam", steam_color).on_hover_text(steam_hover);
 
         if steamcmd_available {
-            chip(ui, "SteamCMD", theme::SUCCESS).on_hover_text("SteamCMD ready for downloads");
+            status_indicator(ui, "SteamCMD", theme::SUCCESS)
+                .on_hover_text("SteamCMD ready for downloads");
         } else {
-            chip(ui, "SteamCMD", theme::WARNING).on_hover_text(
+            status_indicator(ui, "SteamCMD", theme::WARNING).on_hover_text(
                 "SteamCMD not found — set its path in Settings to download without Steam",
             );
         }
@@ -859,6 +1018,36 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
     outcome
 }
 
+fn status_indicator(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Response {
+    const DOT_RADIUS: f32 = 3.0;
+    const DOT_GAP: f32 = 5.0;
+
+    let font = theme::medium_font(11.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, theme::TEXT_MUTED);
+    let size = Vec2::new(
+        DOT_RADIUS * 2.0 + DOT_GAP + galley.size().x,
+        galley.size().y.max(DOT_RADIUS * 2.0 + 4.0),
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let dot_center = egui::pos2(rect.left() + DOT_RADIUS, rect.center().y);
+        ui.painter().circle_filled(dot_center, DOT_RADIUS, color);
+        ui.painter().galley(
+            egui::pos2(
+                rect.left() + DOT_RADIUS * 2.0 + DOT_GAP,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            theme::TEXT_MUTED,
+        );
+    }
+
+    response
+}
+
 fn toggle_value(values: &mut Vec<String>, value: &str) {
     if let Some(position) = values.iter().position(|candidate| candidate == value) {
         values.remove(position);
@@ -867,6 +1056,7 @@ fn toggle_value(values: &mut Vec<String>, value: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_grid(
     ui: &mut egui::Ui,
     cards: &[&WorkshopItem],
@@ -875,6 +1065,7 @@ fn show_grid(
     pager: Option<(u32, u64, bool)>,
     load_status: &WorkshopLoadStatus,
     retry: WorkshopAction,
+    empty_override: Option<&str>,
 ) -> Option<WorkshopAction> {
     let mut action = None;
 
@@ -903,13 +1094,22 @@ fn show_grid(
         return action;
     }
 
-    if cards.is_empty() {
-        let message = match load_status {
+    // Reserve a lane for the floating scrollbar: cards must never sit under
+    // it, or clicking near the edge hits the wrong thing.
+    let available_width = (ui.available_width() - theme::SCROLL_GUTTER).max(200.0);
+
+    // Keep the pager visible when all items on a page were hidden by a local
+    // filter (e.g. "Hide subscribed") so the user can still turn the page.
+    let show_pager_when_empty =
+        empty_override.is_some() && pager.is_some_and(|(_, total, _)| total > 0);
+
+    if cards.is_empty() && !show_pager_when_empty {
+        let message = empty_override.unwrap_or(match load_status {
             WorkshopLoadStatus::Idle => {
                 "Search for mods, or pick a ranking to browse the Workshop."
             }
             _ => "No items match these filters.",
-        };
+        });
 
         ui.vertical_centered(|ui| {
             ui.add_space(48.0);
@@ -919,9 +1119,6 @@ fn show_grid(
         return action;
     }
 
-    // Reserve a lane for the floating scrollbar: cards must never sit under
-    // it, or clicking near the edge hits the wrong thing.
-    let available_width = (ui.available_width() - theme::SCROLL_GUTTER).max(200.0);
     let columns =
         (((available_width + CARD_GAP) / (MIN_CARD_WIDTH + CARD_GAP)).floor() as usize).clamp(1, 6);
     let card_width = ((available_width - CARD_GAP * (columns.saturating_sub(1) as f32))
@@ -942,6 +1139,16 @@ fn show_grid(
         Vec2::new(ui.available_width(), grid_height),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
+            if cards.is_empty() {
+                if let Some(message) = empty_override {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(48.0);
+                        ui.label(RichText::new(message).color(theme::TEXT_MUTED));
+                    });
+                }
+                return;
+            }
+
             egui::ScrollArea::vertical()
                 .id_salt(id_salt)
                 .auto_shrink([false, false])
@@ -966,7 +1173,14 @@ fn show_grid(
 
     if let Some((page, total, api_key_configured)) = pager {
         ui.add_space(6.0);
-        show_pager(ui, page, total, api_key_configured, &mut action);
+        show_pager(
+            ui,
+            page,
+            total,
+            api_key_configured,
+            available_width,
+            &mut action,
+        );
     }
 
     action
@@ -1171,7 +1385,7 @@ fn show_card(
                     }
 
                     if installed {
-                        theme::state_pill(ui, button_size, "✓ Installed", theme::SUCCESS)
+                        theme::state_pill(ui, button_size, "Installed", theme::SUCCESS)
                             .on_hover_text("Already downloaded to your Workshop folder");
                     } else if context.is_installing(item.published_file_id) {
                         ui.allocate_ui_with_layout(
@@ -1227,7 +1441,7 @@ fn subscription_button(
         theme::toggle_button(
             ui,
             size,
-            "✓ Subscribed",
+            "Subscribed",
             "Unsubscribe",
             theme::SUCCESS,
             theme::DANGER,
@@ -1339,17 +1553,51 @@ fn card_version_badge(
     })
 }
 
+fn text_width(ui: &egui::Ui, text: &str, style: egui::TextStyle) -> f32 {
+    let font = style.resolve(ui.style());
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)
+        .size()
+        .x
+}
+
+fn secondary_button_width(ui: &egui::Ui, text: &str) -> f32 {
+    text_width(ui, text, egui::TextStyle::Button) + 32.0
+}
+
 fn show_pager(
     ui: &mut egui::Ui,
     page: u32,
     total: u64,
-    api_key_configured: bool,
+    enabled: bool,
+    grid_width: f32,
     action: &mut Option<WorkshopAction>,
 ) {
     let page_count = (total.div_ceil(ITEMS_PER_PAGE).max(1)) as u32;
-    let enabled = api_key_configured;
+    let numbers = page_numbers(page, page_count);
+    let spacing = ui.spacing().item_spacing.x;
+    let button_padding_x = ui.spacing().button_padding.x * 2.0;
+
+    let mut content_width =
+        secondary_button_width(ui, "Previous") + secondary_button_width(ui, "Next");
+    for number in &numbers {
+        content_width += match number {
+            Some(number) => (text_width(ui, &number.to_string(), egui::TextStyle::Button)
+                + button_padding_x)
+                .max(32.0),
+            None => text_width(ui, "…", egui::TextStyle::Body),
+        };
+    }
+    let item_count = numbers.len() + 2;
+    content_width += spacing * (item_count.saturating_sub(1) as f32);
+
+    let leading = ((grid_width - content_width) * 0.5).max(0.0);
 
     ui.horizontal(|ui| {
+        if leading > 0.0 {
+            ui.add_space(leading);
+        }
+
         if ui
             .add_enabled_ui(enabled && page > 1, |ui| {
                 theme::secondary_button_sized(ui, "Previous", Vec2::new(0.0, theme::CONTROL_HEIGHT))
@@ -1360,7 +1608,7 @@ fn show_pager(
             *action = Some(WorkshopAction::GoToPage(page - 1));
         }
 
-        for number in page_numbers(page, page_count) {
+        for number in numbers {
             match number {
                 Some(number) if number == page => {
                     ui.add(
@@ -1428,6 +1676,7 @@ fn page_numbers(current: u32, page_count: u32) -> Vec<Option<u32>> {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn visible_subscribed_items<'a>(
     items: &'a [WorkshopItem],
     query: &str,
@@ -1435,7 +1684,10 @@ fn visible_subscribed_items<'a>(
     versions: &[String],
     dlc: &[String],
     my_version_only: bool,
+    not_installed_only: bool,
     game_version: Option<&str>,
+    workshop_path: Option<&Path>,
+    steamcmd_workshop_path: Option<&Path>,
 ) -> Vec<&'a WorkshopItem> {
     let tokens = query
         .split_whitespace()
@@ -1448,6 +1700,16 @@ fn visible_subscribed_items<'a>(
             if my_version_only
                 && let Some(game_version) = game_version
                 && !item.supports_version(game_version)
+            {
+                return false;
+            }
+
+            if not_installed_only
+                && is_item_installed(
+                    workshop_path,
+                    steamcmd_workshop_path,
+                    item.published_file_id,
+                )
             {
                 return false;
             }
@@ -1476,10 +1738,15 @@ fn visible_subscribed_items<'a>(
 
             let title = item.title.to_ascii_lowercase();
             let description = item.description.to_ascii_lowercase();
+            let author = item
+                .author
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
 
-            tokens
-                .iter()
-                .all(|token| title.contains(token) || description.contains(token))
+            tokens.iter().all(|token| {
+                title.contains(token) || description.contains(token) || author.contains(token)
+            })
         })
         .collect::<Vec<_>>();
 
@@ -1606,11 +1873,17 @@ fn show_detail_window(
 
             ui.horizontal_wrapped(|ui| {
                 if ui.link("Copy ID").clicked() {
-                    ui.ctx().copy_text(item.published_file_id.to_string());
+                    action = Some(WorkshopAction::Copy {
+                        text: item.published_file_id.to_string(),
+                        label: "Workshop ID",
+                    });
                 }
 
                 if ui.link("Copy link").clicked() {
-                    ui.ctx().copy_text(item.page_url());
+                    action = Some(WorkshopAction::Copy {
+                        text: item.page_url(),
+                        label: "Workshop link",
+                    });
                 }
             });
 
@@ -1671,7 +1944,7 @@ fn show_detail_window(
                 }
 
                 if installed {
-                    theme::state_pill(ui, action_size, "✓ Installed", theme::SUCCESS)
+                    theme::state_pill(ui, action_size, "Installed", theme::SUCCESS)
                         .on_hover_text("Already downloaded to your Workshop folder");
                 } else {
                     let install = ui
@@ -1825,8 +2098,23 @@ fn show_image_viewer(
         return Some(WorkshopAction::CloseImage);
     };
 
-    if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
-        return Some(WorkshopAction::CloseImage);
+    let has_prev = index > 0;
+    let has_next = index + 1 < images.len();
+
+    if has_prev
+        && ui
+            .ctx()
+            .input(|input| input.key_pressed(egui::Key::ArrowLeft))
+    {
+        return Some(WorkshopAction::ShowImage(index - 1));
+    }
+
+    if has_next
+        && ui
+            .ctx()
+            .input(|input| input.key_pressed(egui::Key::ArrowRight))
+    {
+        return Some(WorkshopAction::ShowImage(index + 1));
     }
 
     let screen = ui.ctx().content_rect();
@@ -1834,105 +2122,276 @@ fn show_image_viewer(
     let max_height = (screen.height() * 0.82).max(280.0);
     let image_size = Vec2::new(
         (max_width - 24.0).max(240.0),
-        (max_height - 92.0).max(160.0),
+        (max_height - 116.0).max(160.0),
     );
-    let mut open = true;
     let mut action = None;
 
-    egui::Window::new(format!(
-        "{} · image {} of {}",
-        item.title,
-        index + 1,
-        images.len()
-    ))
-    .id(egui::Id::new("workshop_image_viewer"))
-    .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-    .collapsible(false)
-    .resizable(false)
-    .movable(false)
-    .max_width(max_width)
-    .max_height(max_height)
-    .frame(
-        egui::Frame::new()
-            .fill(theme::SURFACE)
-            .corner_radius(CornerRadius::ZERO)
-            .shadow(theme::soft_shadow())
-            .inner_margin(Margin::same(12)),
-    )
-    .open(&mut open)
-    .show(ui.ctx(), |ui| {
-        apply_workshop_style(ui);
+    let modal = egui::Modal::new(egui::Id::new("workshop_image_viewer"))
+        .frame(
+            egui::Frame::new()
+                .fill(theme::SURFACE)
+                .corner_radius(CornerRadius::ZERO)
+                .shadow(theme::soft_shadow())
+                .inner_margin(Margin::same(12)),
+        )
+        .show(ui.ctx(), |ui| {
+            apply_workshop_style(ui);
+            ui.set_width(image_size.x);
 
-        ui.allocate_ui_with_layout(
-            image_size,
-            egui::Layout::centered_and_justified(egui::Direction::TopDown),
-            |ui| {
-                ui.set_min_size(image_size);
-                ui.painter()
-                    .rect_filled(ui.max_rect(), CornerRadius::ZERO, theme::CANVAS);
-                ui.add(
-                    egui::Image::new(url.as_str())
-                        .max_width(image_size.x)
-                        .max_height(image_size.y)
-                        .maintain_aspect_ratio(true)
-                        .show_loading_spinner(true)
-                        .alt_text(format!("Screenshot for {}", item.title)),
-                );
-            },
-        );
+            // Header bar with centered title and close icon.
+            let header_height = 24.0;
+            let (header_rect, _) =
+                ui.allocate_exact_size(Vec2::new(image_size.x, header_height), Sense::hover());
 
-        ui.add_space(8.0);
-
-        let mut close_clicked = false;
-
-        egui::containers::Sides::new().shrink_left().show(
-            ui,
-            |ui| {
-                if ui
-                    .add_enabled_ui(index > 0, |ui| {
-                        theme::secondary_button_sized(
-                            ui,
-                            "Previous",
-                            Vec2::new(0.0, theme::CONTROL_HEIGHT),
+            let title = format!("{} ({} of {})", item.title, index + 1, images.len());
+            let title_rect = Rect::from_min_max(
+                header_rect.min + Vec2::new(28.0, 0.0),
+                header_rect.max - Vec2::new(28.0, 0.0),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(title_rect).layout(
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                ),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(title)
+                                .text_style(theme::strong_style())
+                                .color(theme::TEXT),
                         )
-                    })
-                    .inner
-                    .clicked()
-                {
+                        .truncate(),
+                    );
+                },
+            );
+
+            let close_icon_rect = Rect::from_min_size(
+                egui::pos2(header_rect.right() - header_height, header_rect.top()),
+                Vec2::splat(header_height),
+            );
+            let close_icon = ui
+                .interact(
+                    close_icon_rect,
+                    ui.id().with("image_viewer_header_close"),
+                    Sense::click(),
+                )
+                .on_hover_text("Close")
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+            if close_icon.hovered() {
+                ui.painter()
+                    .rect_filled(close_icon_rect, CornerRadius::ZERO, theme::SURFACE_HOVER);
+            }
+            let cross_color = if close_icon.hovered() {
+                Color32::WHITE
+            } else {
+                theme::TEXT_MUTED
+            };
+            let c = close_icon_rect.center();
+            let cross = Stroke::new(1.4, cross_color);
+            ui.painter().line_segment(
+                [
+                    egui::pos2(c.x - 4.5, c.y - 4.5),
+                    egui::pos2(c.x + 4.5, c.y + 4.5),
+                ],
+                cross,
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(c.x + 4.5, c.y - 4.5),
+                    egui::pos2(c.x - 4.5, c.y + 4.5),
+                ],
+                cross,
+            );
+
+            if close_icon.clicked() {
+                action = Some(WorkshopAction::CloseImage);
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            let image_area = ui.allocate_ui_with_layout(
+                image_size,
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    ui.set_min_size(image_size);
+                    ui.painter()
+                        .rect_filled(ui.max_rect(), CornerRadius::ZERO, theme::CANVAS);
+                    ui.add(
+                        egui::Image::new(url.as_str())
+                            .max_width(image_size.x)
+                            .max_height(image_size.y)
+                            .maintain_aspect_ratio(true)
+                            .show_loading_spinner(true)
+                            .alt_text(format!("Screenshot for {}", item.title)),
+                    );
+                },
+            );
+
+            let image_rect = image_area.response.rect;
+            let side_width = (image_rect.width() * 0.18).clamp(56.0, 132.0);
+
+            if has_prev {
+                let left_rect = Rect::from_min_max(
+                    image_rect.left_top(),
+                    egui::pos2(image_rect.left() + side_width, image_rect.bottom()),
+                );
+                if image_side_nav_button(ui, left_rect, true).clicked() {
                     action = Some(WorkshopAction::ShowImage(index - 1));
                 }
+            }
 
-                if ui
-                    .add_enabled_ui(index + 1 < images.len(), |ui| {
-                        theme::secondary_button_sized(
-                            ui,
-                            "Next",
-                            Vec2::new(0.0, theme::CONTROL_HEIGHT),
-                        )
-                    })
-                    .inner
-                    .clicked()
-                {
+            if has_next {
+                let right_rect = Rect::from_min_max(
+                    egui::pos2(image_rect.right() - side_width, image_rect.top()),
+                    image_rect.right_bottom(),
+                );
+                if image_side_nav_button(ui, right_rect, false).clicked() {
                     action = Some(WorkshopAction::ShowImage(index + 1));
                 }
-            },
-            |ui| {
-                if theme::secondary_button(ui, "Close").clicked() {
-                    close_clicked = true;
-                }
-            },
-        );
+            }
 
-        if close_clicked {
-            action = Some(WorkshopAction::CloseImage);
-        }
-    });
+            ui.add_space(8.0);
 
-    if !open {
+            // Footer bar: Previous & Next centered, Close on the right.
+            let (footer_rect, _) = ui.allocate_exact_size(
+                Vec2::new(image_size.x, theme::CONTROL_HEIGHT),
+                Sense::hover(),
+            );
+
+            let spacing = ui.spacing().item_spacing.x;
+            let nav_width = secondary_button_width(ui, "Previous")
+                + spacing
+                + secondary_button_width(ui, "Next");
+            let nav_rect = Rect::from_center_size(
+                footer_rect.center(),
+                Vec2::new(nav_width, theme::CONTROL_HEIGHT),
+            );
+
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(nav_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    if ui
+                        .add_enabled_ui(has_prev, |ui| {
+                            theme::secondary_button_sized(
+                                ui,
+                                "Previous",
+                                Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        action = Some(WorkshopAction::ShowImage(index - 1));
+                    }
+
+                    if ui
+                        .add_enabled_ui(has_next, |ui| {
+                            theme::secondary_button_sized(
+                                ui,
+                                "Next",
+                                Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        action = Some(WorkshopAction::ShowImage(index + 1));
+                    }
+                },
+            );
+
+            let close_width = secondary_button_width(ui, "Close").max(88.0);
+            let close_rect = Rect::from_min_max(
+                egui::pos2(footer_rect.right() - close_width, footer_rect.top()),
+                footer_rect.right_bottom(),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(close_rect)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    if theme::secondary_button(ui, "Close").clicked() {
+                        action = Some(WorkshopAction::CloseImage);
+                    }
+                },
+            );
+        });
+
+    if modal.should_close() {
         action = Some(WorkshopAction::CloseImage);
     }
 
     action
+}
+
+fn image_side_nav_button(ui: &mut egui::Ui, rect: Rect, is_previous: bool) -> egui::Response {
+    let id = ui.id().with(if is_previous {
+        "image_viewer_prev_side"
+    } else {
+        "image_viewer_next_side"
+    });
+    let response = ui
+        .interact(rect, id, Sense::click())
+        .on_hover_text(if is_previous {
+            "Previous image"
+        } else {
+            "Next image"
+        })
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    let hovered = response.hovered();
+    let active = response.is_pointer_button_down_on();
+
+    if hovered || active {
+        let overlay_alpha = if active { 70 } else { 42 };
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            Color32::from_black_alpha(overlay_alpha),
+        );
+    }
+
+    let badge_size = Vec2::new(34.0, 48.0);
+    let badge_center_x = if is_previous {
+        rect.left() + 26.0
+    } else {
+        rect.right() - 26.0
+    };
+    let badge_rect =
+        Rect::from_center_size(egui::pos2(badge_center_x, rect.center().y), badge_size);
+    let badge_alpha = if active {
+        215
+    } else if hovered {
+        190
+    } else {
+        115
+    };
+    ui.painter().rect_filled(
+        badge_rect,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(15, 19, 25, badge_alpha),
+    );
+
+    let chevron_color = if hovered || active {
+        Color32::WHITE
+    } else {
+        theme::TEXT
+    };
+    let dir = if is_previous { -1.0 } else { 1.0 };
+    let center = badge_rect.center();
+    let points = vec![
+        egui::pos2(center.x - dir * 4.0, center.y - 8.0),
+        egui::pos2(center.x + dir * 4.0, center.y),
+        egui::pos2(center.x - dir * 4.0, center.y + 8.0),
+    ];
+    ui.painter()
+        .add(egui::Shape::line(points, Stroke::new(2.0, chevron_color)));
+
+    response
 }
 
 fn installed_workshop_mod(mods: &ModCollection, published_file_id: u64) -> Option<&RimworldMod> {
@@ -2002,6 +2461,14 @@ mod tests {
             page_numbers(2, 20),
             vec![Some(1), Some(2), Some(3), None, Some(20)]
         );
+    }
+
+    #[test]
+    fn format_number_inserts_thousand_separators() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(137), "137");
+        assert_eq!(format_number(6041), "6,041");
+        assert_eq!(format_number(1_234_567), "1,234,567");
     }
 
     #[test]
@@ -2109,17 +2576,19 @@ mod tests {
     }
 
     #[test]
-    fn subscribed_search_matches_titles_and_descriptions() {
+    fn subscribed_search_matches_titles_descriptions_and_authors() {
+        let mut by_oskar = subscribed_item(
+            1,
+            "Vanilla Furniture",
+            "Adds couches",
+            10,
+            100,
+            &["1.6"],
+            &[],
+        );
+        by_oskar.author = Some("Oskar Potocki".to_owned());
         let items = vec![
-            subscribed_item(
-                1,
-                "Vanilla Furniture",
-                "Adds couches",
-                10,
-                100,
-                &["1.6"],
-                &[],
-            ),
+            by_oskar,
             subscribed_item(2, "Fishing", "Adds ocean fish", 30, 50, &["1.6"], &[]),
         ];
 
@@ -2130,11 +2599,30 @@ mod tests {
             &[],
             &[],
             false,
+            false,
             Some("1.6"),
+            None,
+            None,
         );
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].published_file_id, 2);
+
+        let by_author = visible_subscribed_items(
+            &items,
+            "oskar",
+            SubscribedSort::RecentlyUpdated,
+            &[],
+            &[],
+            false,
+            false,
+            Some("1.6"),
+            None,
+            None,
+        );
+
+        assert_eq!(by_author.len(), 1);
+        assert_eq!(by_author[0].published_file_id, 1);
     }
 
     #[test]
@@ -2151,6 +2639,9 @@ mod tests {
             &["1.5".to_owned(), "1.6".to_owned()],
             &["Biotech".to_owned()],
             false,
+            false,
+            None,
+            None,
             None,
         );
 
@@ -2172,6 +2663,9 @@ mod tests {
             &[],
             &[],
             false,
+            false,
+            None,
+            None,
             None,
         );
         assert_eq!(recent[0].published_file_id, 2);
@@ -2183,6 +2677,9 @@ mod tests {
             &[],
             &[],
             false,
+            false,
+            None,
+            None,
             None,
         );
         assert_eq!(popular[0].published_file_id, 1);

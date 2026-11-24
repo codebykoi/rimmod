@@ -454,3 +454,232 @@ fn missing_manifest_is_reported() {
 
     fs::remove_dir_all(directory).expect("remove test directory");
 }
+
+#[test]
+fn archive_preview_reads_manifest_and_icon_without_extracting() {
+    let directory = test_directory("archive-preview");
+    let instance = directory.join("instance");
+    let exported = directory.join("preview.rimpack");
+    let mod_folder = directory.join("source-mod");
+    let icon: &[u8] = b"\x89PNG-preview-icon";
+    let manifest = local_manifest("LocalMod");
+
+    write_file(&mod_folder.join("About").join("About.xml"), b"<Mod/>");
+
+    write_instance(
+        &instance,
+        PackWriteRequest {
+            manifest: &manifest,
+            icon: Some(icon),
+            local_mods: &[("LocalMod".to_owned(), mod_folder)],
+            configs: &[],
+            saves: &[],
+        },
+        &mut |_| {},
+    )
+    .expect("write instance");
+
+    export_instance(&instance, &exported, &mut |_| {}).expect("export instance");
+
+    let preview = read_archive_preview(&exported).expect("read archive preview");
+    assert_eq!(preview.manifest.name, "Test pack");
+    assert_eq!(preview.manifest.mods.len(), 3);
+    assert_eq!(preview.icon.as_deref(), Some(icon));
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn duplicate_instance_copies_all_contents_with_new_name() {
+    let directory = test_directory("duplicate");
+    let source = directory.join("source");
+    let copy = directory.join("copy");
+    let mod_folder = directory.join("source-mod");
+    let config_root = directory.join("source-config");
+    let save_path = directory.join("Colony.rws");
+
+    write_file(&mod_folder.join("About").join("About.xml"), b"<Mod/>");
+    write_file(&config_root.join("Mod_Test.xml"), b"<cfg/>");
+    write_file(&save_path, b"save-bytes");
+
+    let manifest = local_manifest("LocalMod");
+    let configs = discover_config_files(&config_root);
+    let saves = vec![("Colony.rws".to_owned(), save_path)];
+    let icon: &[u8] = b"icon-bytes";
+
+    write_instance(
+        &source,
+        PackWriteRequest {
+            manifest: &manifest,
+            icon: Some(icon),
+            local_mods: &[("LocalMod".to_owned(), mod_folder)],
+            configs: &configs,
+            saves: &saves,
+        },
+        &mut |_| {},
+    )
+    .expect("write source");
+
+    let summary = duplicate_instance(&source, &copy, "Test pack (Copy)").expect("duplicate");
+    assert_eq!(summary.manifest.name, "Test pack (Copy)");
+    assert_eq!(summary.manifest.mods.len(), 3);
+    assert_eq!(summary.manifest.configs, ["Mod_Test.xml"]);
+    assert_eq!(summary.manifest.saves, ["Colony.rws"]);
+    assert_eq!(summary.icon.as_deref(), Some(icon));
+    assert!(summary.size_bytes > 0);
+    assert!(
+        copy.join("mods")
+            .join("LocalMod")
+            .join("About")
+            .join("About.xml")
+            .is_file()
+    );
+    assert!(copy.join("configs").join("Mod_Test.xml").is_file());
+    assert!(copy.join("saves").join("Colony.rws").is_file());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn apply_options_can_skip_configs_and_saves() {
+    let directory = test_directory("apply-options");
+    let instance = directory.join("instance");
+    let mod_folder = directory.join("source-mod");
+    let source_config = directory.join("source-config");
+    let save_path = directory.join("Colony.rws");
+    let mods_root = directory.join("Mods");
+    let config_root = directory.join("Config");
+    let saves_root = directory.join("Saves");
+
+    write_file(&mod_folder.join("About").join("About.xml"), b"<Mod/>");
+    write_file(&source_config.join("Mod_Test.xml"), b"<cfg/>");
+    write_file(&save_path, b"save-bytes");
+
+    let manifest = local_manifest("LocalMod");
+    let configs = discover_config_files(&source_config);
+    let saves = vec![("Colony.rws".to_owned(), save_path)];
+
+    write_instance(
+        &instance,
+        PackWriteRequest {
+            manifest: &manifest,
+            icon: None,
+            local_mods: &[("LocalMod".to_owned(), mod_folder)],
+            configs: &configs,
+            saves: &saves,
+        },
+        &mut |_| {},
+    )
+    .expect("write instance");
+
+    let applied = apply_instance_with_options(
+        &instance,
+        &mods_root,
+        &config_root,
+        &saves_root,
+        PackApplyOptions {
+            restore_configs: false,
+            restore_saves: false,
+            overwrite_saves: false,
+        },
+        &mut |_| {},
+    )
+    .expect("apply without configs/saves");
+
+    assert_eq!(applied.installed_local_mods, ["LocalMod"]);
+    assert!(applied.restored_configs.is_empty());
+    assert!(applied.restored_saves.is_empty());
+    assert!(
+        mods_root
+            .join("LocalMod")
+            .join("About")
+            .join("About.xml")
+            .is_file()
+    );
+    assert!(!config_root.join("Mod_Test.xml").exists());
+    assert!(!saves_root.join("Colony.rws").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn editing_instance_in_place_prunes_removed_items_and_keeps_selected_files() {
+    let directory = test_directory("edit-in-place");
+    let instance = directory.join("instance");
+    let mod_folder = directory.join("source-mod");
+    let source_config = directory.join("source-config");
+    let save_a = directory.join("A.rws");
+    let save_b = directory.join("B.rws");
+
+    write_file(&mod_folder.join("About").join("About.xml"), b"<Mod/>");
+    write_file(&source_config.join("Mod_Keep.xml"), b"<keep/>");
+    write_file(&source_config.join("Mod_Drop.xml"), b"<drop/>");
+    write_file(&save_a, b"save-a");
+    write_file(&save_b, b"save-b");
+
+    let manifest = local_manifest("LocalMod");
+    let configs = discover_config_files(&source_config);
+    let saves = vec![("A.rws".to_owned(), save_a), ("B.rws".to_owned(), save_b)];
+
+    write_instance(
+        &instance,
+        PackWriteRequest {
+            manifest: &manifest,
+            icon: Some(b"icon-v1"),
+            local_mods: &[("LocalMod".to_owned(), mod_folder)],
+            configs: &configs,
+            saves: &saves,
+        },
+        &mut |_| {},
+    )
+    .expect("write initial instance");
+
+    // Simulate EditDetails: load existing items from the instance directory,
+    // prune Mod_Drop.xml and B.rws, rename the pack, and write back to `instance`.
+    let loaded = read_instance(&instance).expect("read instance");
+    let mut edited_manifest = loaded.manifest.clone();
+    edited_manifest.name = "Renamed Pack".to_owned();
+
+    let kept_local_mods = instance_local_mods(&instance, &loaded.manifest);
+    let kept_configs: Vec<_> = instance_configs(&instance, &loaded.manifest)
+        .into_iter()
+        .filter(|(rel, _)| rel == "Mod_Keep.xml")
+        .collect();
+    let kept_saves: Vec<_> = instance_saves(&instance, &loaded.manifest)
+        .into_iter()
+        .filter(|(name, _)| name == "A.rws")
+        .collect();
+
+    write_instance(
+        &instance,
+        PackWriteRequest {
+            manifest: &edited_manifest,
+            icon: loaded.icon.as_deref(),
+            local_mods: &kept_local_mods,
+            configs: &kept_configs,
+            saves: &kept_saves,
+        },
+        &mut |_| {},
+    )
+    .expect("write edited instance in place");
+
+    let reloaded = read_instance(&instance).expect("reload edited instance");
+    assert_eq!(reloaded.manifest.name, "Renamed Pack");
+    assert_eq!(reloaded.manifest.configs, ["Mod_Keep.xml"]);
+    assert_eq!(reloaded.manifest.saves, ["A.rws"]);
+    assert_eq!(reloaded.icon.as_deref(), Some(b"icon-v1".as_slice()));
+    assert!(
+        instance
+            .join("mods")
+            .join("LocalMod")
+            .join("About")
+            .join("About.xml")
+            .is_file()
+    );
+    assert!(instance.join("configs").join("Mod_Keep.xml").is_file());
+    assert!(!instance.join("configs").join("Mod_Drop.xml").exists());
+    assert!(instance.join("saves").join("A.rws").is_file());
+    assert!(!instance.join("saves").join("B.rws").exists());
+
+    fs::remove_dir_all(directory).expect("remove test directory");
+}

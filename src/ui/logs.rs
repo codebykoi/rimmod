@@ -900,7 +900,7 @@ fn suspect_tooltip(suspect: &SuspectSummary) -> String {
     };
 
     format!(
-        "{}\n{}\n{}{status}\nClick to filter · Right-click for actions",
+        "{}\n{}\n{}{status}\nClick to filter, right-click for actions",
         suspect.name,
         suspect.package_id.as_str(),
         summary,
@@ -1168,7 +1168,7 @@ fn show_issue_row(
             .join(", ");
 
         format!(
-            "[{}] {}\n{} occurrence{} · Matched: {suspects}",
+            "[{}] {}\n{} occurrence{} - Matched: {suspects}",
             issue.level.label(),
             issue.title,
             issue.count,

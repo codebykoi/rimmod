@@ -63,8 +63,11 @@ pub(super) struct WorkshopState {
     pub(super) versions: Vec<String>,
     pub(super) dlc: Vec<String>,
     pub(super) my_version_only: bool,
+    pub(super) hide_subscribed: bool,
+    pub(super) not_installed_only: bool,
     pub(super) tab: WorkshopTab,
     pub(super) page: u32,
+    pub(super) subscribed_page: u32,
     pub(super) total: u64,
     pub(super) items: Vec<WorkshopItem>,
     pub(super) load_status: WorkshopLoadStatus,
@@ -83,7 +86,6 @@ pub(super) struct WorkshopState {
     pub(super) detail: Option<WorkshopItem>,
     /// Index into `detail.images` while the in-app image viewer is open.
     pub(super) detail_image: Option<usize>,
-    pub(super) subscribed_visible: usize,
     pub(super) pending_search: bool,
     pub(super) grid_generation: u64,
     pub(super) subscribed_generation: u64,
@@ -103,8 +105,11 @@ impl Default for WorkshopState {
             versions: Vec::new(),
             dlc: Vec::new(),
             my_version_only: false,
+            hide_subscribed: false,
+            not_installed_only: false,
             tab: WorkshopTab::Browse,
             page: 1,
+            subscribed_page: 1,
             total: 0,
             items: Vec::new(),
             load_status: WorkshopLoadStatus::default(),
@@ -122,7 +127,6 @@ impl Default for WorkshopState {
             pending_subscriptions: HashSet::new(),
             detail: None,
             detail_image: None,
-            subscribed_visible: 60,
             pending_search: false,
             grid_generation: 0,
             subscribed_generation: 0,
@@ -160,6 +164,7 @@ impl App {
         self.workshop.items.clear();
         self.workshop.total = 0;
         self.workshop.page = 1;
+        self.workshop.subscribed_page = 1;
         self.workshop.detail = None;
         self.workshop.detail_image = None;
     }
@@ -372,7 +377,7 @@ impl App {
     fn apply_subscription_snapshot(&mut self, snapshot: SubscriptionSnapshot) {
         self.workshop.subscriptions = SubscriptionStatus::Ready(snapshot.ids);
         self.workshop.subscribed_items = snapshot.items;
-        self.workshop.subscribed_visible = 60;
+        self.workshop.subscribed_page = 1;
         self.workshop.subscribed_load = WorkshopLoadStatus::Ready;
         self.workshop.subscribed_generation = self.workshop.subscribed_generation.wrapping_add(1);
     }

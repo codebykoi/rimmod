@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use eframe::egui;
@@ -41,19 +42,20 @@ mod workshop_ctrl;
 use self::deletion::PendingModDeletion;
 use self::history::LoadOrderSnapshot;
 use self::log_ctrl::LogState;
-use self::modpacks_ctrl::ModpackState;
+use self::modpacks_ctrl::{ModpackState, open_exported_pack_folder_action};
 use self::settings_apply::{path_from_input, path_to_input, persist_settings};
 use self::update_ctrl::{UpdateState, open_update_release_action};
 use self::workshop_ctrl::{CoveredModsStatus, SubscriptionStatus, WorkshopState};
 
 const SETTINGS_STORAGE_KEY: &str = "rimmod_settings";
+const ACTIVE_MODPACK_STORAGE_KEY: &str = "rimmod_active_modpack";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum AppTab {
     #[default]
     Mods,
-    Modpacks,
     Workshop,
+    Modpacks,
     Log,
 }
 
@@ -162,6 +164,10 @@ impl App {
 
         settings.fill_missing_from(Settings::auto_discover());
 
+        let active_pack = cc.storage.and_then(|storage| {
+            eframe::get_value::<Option<PathBuf>>(storage, ACTIVE_MODPACK_STORAGE_KEY).flatten()
+        });
+
         let mut app = Self {
             settings,
             toasts: Toasts::default().with_shadow(theme::soft_shadow()),
@@ -169,6 +175,8 @@ impl App {
             ..Self::default()
         };
 
+        app.modpacks.active_pack = active_pack;
+        app.ensure_modpack_library_loaded();
         app.load_organization();
 
         app.game_version = match app.settings.rimworld_path() {
@@ -323,7 +331,7 @@ impl App {
                 let message = if notes.is_empty() {
                     "Active mods sorted".to_owned()
                 } else {
-                    format!("Active mods sorted · {}", notes.join(", "))
+                    format!("Active mods sorted ({})", notes.join(", "))
                 };
 
                 self.toasts.success(message);
@@ -378,8 +386,8 @@ impl App {
 
         let tabs = [
             (egui::Key::Num1, AppTab::Mods),
-            (egui::Key::Num2, AppTab::Modpacks),
-            (egui::Key::Num3, AppTab::Workshop),
+            (egui::Key::Num2, AppTab::Workshop),
+            (egui::Key::Num3, AppTab::Modpacks),
             (egui::Key::Num4, AppTab::Log),
         ];
 
@@ -397,6 +405,11 @@ impl App {
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, SETTINGS_STORAGE_KEY, &self.settings);
+        eframe::set_value(
+            storage,
+            ACTIVE_MODPACK_STORAGE_KEY,
+            &self.modpacks.active_pack,
+        );
 
         // Safety net: tags are also written after every edit, but a periodic
         // save keeps an unexpectedly closed app from losing the last change.
@@ -575,16 +588,16 @@ impl eframe::App for App {
                                 self.current_tab = AppTab::Mods;
                             }
 
-                            if theme::tab(ui, self.current_tab == AppTab::Modpacks, "Modpacks")
-                                .clicked()
-                            {
-                                self.current_tab = AppTab::Modpacks;
-                            }
-
                             if theme::tab(ui, self.current_tab == AppTab::Workshop, "Workshop")
                                 .clicked()
                             {
                                 self.current_tab = AppTab::Workshop;
+                            }
+
+                            if theme::tab(ui, self.current_tab == AppTab::Modpacks, "Modpacks")
+                                .clicked()
+                            {
+                                self.current_tab = AppTab::Modpacks;
                             }
 
                             let log_errors = self
@@ -717,13 +730,21 @@ impl eframe::App for App {
                             }
                             AppTab::Modpacks => {
                                 self.ensure_modpack_library_loaded();
+                                let modal_open = self.state.settings_open
+                                    || self.state.shortcuts_open
+                                    || self.modpacks.has_open_modal();
 
                                 modpacks_action = show_modpacks(
                                     ui,
                                     ModpacksView {
                                         packs: &self.modpacks.packs,
                                         selected: self.modpacks.selected.as_deref(),
+                                        active_pack: self.modpacks.active_pack.as_deref(),
+                                        mods: &self.mods,
+                                        game_version: self.game_version.as_deref(),
                                         library_error: self.modpacks.library_error.as_deref(),
+                                        ui_state: &mut self.modpacks.ui_state,
+                                        modal_open,
                                     },
                                 );
                             }
@@ -783,7 +804,10 @@ impl eframe::App for App {
                                         versions: &mut self.workshop.versions,
                                         dlc: &mut self.workshop.dlc,
                                         my_version_only: &mut self.workshop.my_version_only,
+                                        hide_subscribed: &mut self.workshop.hide_subscribed,
+                                        not_installed_only: &mut self.workshop.not_installed_only,
                                         page: self.workshop.page,
+                                        subscribed_page: &mut self.workshop.subscribed_page,
                                         total: self.workshop.total,
                                         items: &self.workshop.items,
                                         load_status: &self.workshop.load_status,
@@ -809,7 +833,6 @@ impl eframe::App for App {
                                         ),
                                         subscriptions_error: self.workshop.subscriptions.error(),
                                         pending_subscriptions: &self.workshop.pending_subscriptions,
-                                        subscribed_visible: self.workshop.subscribed_visible,
                                         grid_generation: self.workshop.grid_generation,
                                         subscribed_generation: self.workshop.subscribed_generation,
                                         detail: self.workshop.detail.as_ref(),
@@ -835,7 +858,10 @@ impl eframe::App for App {
             Some(WorkshopAction::Search) => {
                 self.search_workshop(ui.ctx());
             }
-            Some(WorkshopAction::GoToPage(page)) => self.start_workshop_query(page, ui.ctx()),
+            Some(WorkshopAction::GoToPage(page)) => match self.workshop.tab {
+                WorkshopTab::Browse => self.start_workshop_query(page, ui.ctx()),
+                WorkshopTab::Subscribed => self.workshop.subscribed_page = page.max(1),
+            },
             Some(WorkshopAction::SwitchTab(tab)) => {
                 self.workshop.tab = tab;
 
@@ -877,9 +903,9 @@ impl eframe::App for App {
             Some(WorkshopAction::CloseImage) => {
                 self.workshop.detail_image = None;
             }
-            Some(WorkshopAction::ShowMoreSubscribed) => {
-                self.workshop.subscribed_visible =
-                    self.workshop.subscribed_visible.saturating_add(60);
+            Some(WorkshopAction::Copy { text, label }) => {
+                ui.ctx().copy_text(text);
+                self.toasts.info(format!("{label} copied to clipboard"));
             }
             None => {}
         }
@@ -887,15 +913,19 @@ impl eframe::App for App {
         self.show_mod_deletion_confirmation(ui.ctx());
         self.show_organize_dialog(ui.ctx());
         self.show_pack_editor(ui.ctx());
+        self.show_drop_preview_modal(ui.ctx());
         self.show_pack_apply_confirmation(ui.ctx());
         self.show_pack_delete_confirmation(ui.ctx());
         self.show_pack_progress_dialog(ui.ctx());
+        self.handle_file_drop(ui.ctx());
 
         for action in self.toasts.show(ui.ctx()) {
             if action == open_settings_action() {
                 self.open_settings();
             } else if action == open_update_release_action() {
                 self.open_update_release_page();
+            } else if action == open_exported_pack_folder_action() {
+                self.open_last_exported_pack_folder();
             }
         }
 

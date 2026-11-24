@@ -14,15 +14,23 @@ use crate::models::{ModSource, PackageId};
 use crate::services::load_order;
 use crate::services::mod_loader;
 use crate::services::modpack::{
-    self, AppliedPack, ModpackManifest, PackMod, PackOrganization, PackSource, PackSummary,
-    PackWriteRequest,
+    self, AppliedPack, ModpackManifest, PackApplyOptions, PackDiff, PackMod, PackOrganization,
+    PackSource, PackSummary, PackWriteRequest,
 };
 use crate::services::workshop;
 use crate::ui;
-use crate::ui::modpacks::{ModpacksAction, PackEditorOutcome, PackEditorView};
+use crate::ui::OpenTarget;
+use crate::ui::modpacks::{
+    ApplyDiffDecision, ApplyDiffView, DropPreviewDecision, DropPreviewItem, DropPreviewView,
+    ModpacksAction, ModpacksUiState, PackEditorMode, PackEditorOutcome, PackEditorView,
+};
 
 use super::workshop_ctrl::SubscriptionStatus;
 use super::{App, AppTab, LoadOrderStatus};
+
+pub(super) fn open_exported_pack_folder_action() -> egui::Id {
+    egui::Id::new("open_exported_pack_folder")
+}
 
 struct PackBusy {
     title: String,
@@ -39,15 +47,6 @@ struct PackResultDialog {
 }
 
 impl PackResultDialog {
-    fn success(title: impl Into<String>, lines: Vec<String>) -> Self {
-        Self {
-            title: title.into(),
-            success: true,
-            lines,
-            warnings: Vec::new(),
-        }
-    }
-
     fn failure(title: impl Into<String>, error: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -79,13 +78,21 @@ impl ProgressHandle {
 
 enum PackTaskResult {
     Created(Result<PackSummary, String>),
-    Updated(Result<PackSummary, String>),
-    Imported(Result<PackSummary, String>),
+    Updated {
+        result: Result<PackSummary, String>,
+        from_active: bool,
+    },
+    Duplicated(Result<PackSummary, String>),
+    Imported {
+        result: Result<Vec<PackSummary>, String>,
+        apply_after: bool,
+    },
     Exported(Result<PathBuf, String>),
     Applied(Result<Box<ApplyOutcome>, String>),
 }
 
 struct ApplyOutcome {
+    pack_path: PathBuf,
     applied: AppliedPack,
     installed_workshop_mods: Vec<u64>,
     subscribed_workshop_mods: Vec<u64>,
@@ -96,11 +103,14 @@ struct ApplyOutcome {
 }
 
 pub(super) struct PackEditor {
+    pub(super) mode: PackEditorMode,
     pub(super) name: String,
     pub(super) description: String,
     pub(super) tags_input: String,
+    pub(super) mod_search: String,
     pub(super) icon: Option<Arc<[u8]>>,
     pub(super) icon_generation: u64,
+    pub(super) icon_drop_hovered: bool,
     pub(super) mods: Vec<PackMod>,
     pub(super) local_mods: Vec<(String, PathBuf)>,
     pub(super) excluded_mods: HashSet<String>,
@@ -110,18 +120,21 @@ pub(super) struct PackEditor {
     pub(super) selected_saves: HashSet<String>,
     pub(super) organization: BTreeMap<String, PackOrganization>,
     pub(super) game_version: Option<String>,
-    pub(super) update_path: Option<PathBuf>,
+    pub(super) target_path: Option<PathBuf>,
+    pub(super) update_diff: Option<PackDiff>,
 }
 
 struct PendingPackApply {
     path: PathBuf,
-    overwrite_saves: bool,
+    options: PackApplyOptions,
 }
 
 #[derive(Default)]
 pub(super) struct ModpackState {
     pub(super) packs: Vec<PackSummary>,
     pub(super) selected: Option<PathBuf>,
+    pub(super) active_pack: Option<PathBuf>,
+    pub(super) ui_state: ModpacksUiState,
     pub(super) loaded: bool,
     pub(super) library_error: Option<String>,
     pub(super) editor: Option<PackEditor>,
@@ -129,6 +142,19 @@ pub(super) struct ModpackState {
     result: Option<PackResultDialog>,
     pending_apply: Option<PendingPackApply>,
     pending_delete: Option<PathBuf>,
+    pending_drop: Option<Vec<DropPreviewItem>>,
+    last_exported_folder: Option<PathBuf>,
+}
+
+impl ModpackState {
+    pub(super) fn has_open_modal(&self) -> bool {
+        self.editor.is_some()
+            || self.busy.is_some()
+            || self.result.is_some()
+            || self.pending_apply.is_some()
+            || self.pending_delete.is_some()
+            || self.pending_drop.is_some()
+    }
 }
 
 impl App {
@@ -158,6 +184,17 @@ impl App {
                     self.modpacks.selected =
                         self.modpacks.packs.first().map(|pack| pack.path.clone());
                 }
+
+                // Clear tracked active pack if its folder was deleted externally.
+                if let Some(active) = self.modpacks.active_pack.as_ref()
+                    && !self
+                        .modpacks
+                        .packs
+                        .iter()
+                        .any(|pack| paths_equal(&pack.path, active))
+                {
+                    self.modpacks.active_pack = None;
+                }
             }
             Err(error) => {
                 self.modpacks.library_error =
@@ -171,6 +208,12 @@ impl App {
             .busy
             .as_ref()
             .and_then(|busy| busy.label.lock().ok().map(|label| label.clone()))
+    }
+
+    pub(super) fn open_last_exported_pack_folder(&mut self) {
+        if let Some(folder) = self.modpacks.last_exported_folder.clone() {
+            self.open_target(OpenTarget::Folder(folder));
+        }
     }
 
     pub(super) fn handle_modpacks_action(
@@ -188,16 +231,26 @@ impl App {
 
                 self.begin_pack_editor();
             }
-            ModpacksAction::Update(path) => {
+            ModpacksAction::EditDetails(path) => {
                 if self.pack_busy_label().is_some() {
                     self.toasts
                         .info("Wait for the current modpack task to finish first");
                     return;
                 }
 
-                self.begin_update_pack(path);
+                self.begin_edit_pack_details(path);
             }
-            ModpacksAction::Import => self.import_pack(context),
+            ModpacksAction::UpdateFromActive(path) => {
+                if self.pack_busy_label().is_some() {
+                    self.toasts
+                        .info("Wait for the current modpack task to finish first");
+                    return;
+                }
+
+                self.begin_update_pack_from_active(path);
+            }
+            ModpacksAction::Duplicate(path) => self.duplicate_pack(path, context),
+            ModpacksAction::Import => self.import_pack_from_dialog(context),
             ModpacksAction::Refresh => {
                 if self.pack_busy_label().is_some() {
                     self.toasts
@@ -219,10 +272,27 @@ impl App {
 
                 self.modpacks.pending_apply = Some(PendingPackApply {
                     path,
-                    overwrite_saves: false,
+                    options: PackApplyOptions::default(),
                 });
             }
             ModpacksAction::Export(path) => self.export_pack(path, context),
+            ModpacksAction::CopyModList(path) => {
+                if let Some(pack) = self
+                    .modpacks
+                    .packs
+                    .iter()
+                    .find(|pack| paths_equal(&pack.path, &path))
+                {
+                    let formatted = modpack::format_mod_list_for_share(&pack.manifest);
+                    context.copy_text(formatted);
+                    self.toasts.info("Mod list copied to clipboard");
+                }
+            }
+            ModpacksAction::CopyText { text, label } => {
+                context.copy_text(text);
+                self.toasts.info(format!("{label} copied to clipboard"));
+            }
+            ModpacksAction::Open(target) => self.open_target(target),
             ModpacksAction::Delete(path) => {
                 if self.pack_busy_label().is_some() {
                     self.toasts
@@ -244,15 +314,231 @@ impl App {
         }
     }
 
+    /// Handle OS file drag-and-drop across the entire window:
+    /// - `.rimpack` files anywhere → drop overlay + preview modal (`Import` / `Import & Apply`)
+    /// - Image files while the Pack Editor is open → set modpack icon
+    pub(super) fn handle_file_drop(&mut self, context: &egui::Context) {
+        let (hovered_files, dropped_files) = context.input(|input| {
+            (
+                input.raw.hovered_files.clone(),
+                input.raw.dropped_files.clone(),
+            )
+        });
+
+        if let Some(editor) = self.modpacks.editor.as_mut() {
+            editor.icon_drop_hovered = !hovered_files.is_empty()
+                && hovered_files.iter().any(|file| {
+                    file.path
+                        .as_deref()
+                        .is_none_or(modpack::is_supported_icon_path)
+                });
+
+            if !dropped_files.is_empty() {
+                let image_path = dropped_files
+                    .iter()
+                    .map(|file| file.path())
+                    .find(|path| modpack::is_supported_icon_path(path))
+                    .map(Path::to_path_buf);
+
+                if let Some(path) = image_path {
+                    self.apply_icon_from_path(&path);
+                } else if dropped_files
+                    .iter()
+                    .map(|file| file.path())
+                    .any(modpack::is_pack_path)
+                {
+                    self.toasts
+                        .info("Close the modpack editor before importing a .rimpack file");
+                }
+            }
+
+            return;
+        }
+
+        if self.pack_busy_label().is_some() {
+            return;
+        }
+
+        if !hovered_files.is_empty() {
+            let known_paths: Vec<&Path> = hovered_files
+                .iter()
+                .filter_map(|file| file.path.as_deref())
+                .collect();
+            let rimpack_names: Vec<String> = known_paths
+                .iter()
+                .filter(|path| modpack::is_pack_path(path))
+                .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+                .map(str::to_owned)
+                .collect();
+
+            // Show the overlay when at least one hovered file is a `.rimpack`,
+            // or when the platform withholds paths until drop.
+            let show_overlay = !rimpack_names.is_empty() || known_paths.is_empty();
+            if show_overlay {
+                ui::modpacks::show_drop_overlay(context, &rimpack_names);
+            }
+        }
+
+        if dropped_files.is_empty() {
+            return;
+        }
+
+        let rimpack_paths: Vec<PathBuf> = dropped_files
+            .iter()
+            .map(|file| file.path())
+            .filter(|path| modpack::is_pack_path(path))
+            .map(Path::to_path_buf)
+            .collect();
+
+        if rimpack_paths.is_empty() {
+            self.toasts.info("Drop a .rimpack file to import a modpack");
+            return;
+        }
+
+        self.ensure_modpack_library_loaded();
+
+        let mut items = Vec::new();
+        let mut errors = Vec::new();
+
+        for path in rimpack_paths {
+            match modpack::read_archive_preview(&path) {
+                Ok(loaded) => {
+                    let file_size = fs::metadata(&path).map_or(0, |meta| meta.len());
+                    let already_in_library = self.modpacks.packs.iter().any(|pack| {
+                        pack.manifest
+                            .name
+                            .eq_ignore_ascii_case(&loaded.manifest.name)
+                    });
+
+                    items.push(DropPreviewItem {
+                        path,
+                        file_size,
+                        manifest: loaded.manifest,
+                        icon: loaded.icon,
+                        already_in_library,
+                    });
+                }
+                Err(error) => {
+                    errors.push(error.to_string());
+                }
+            }
+        }
+
+        if items.is_empty() {
+            if let Some(first_error) = errors.first() {
+                self.report_action_error(format!("Could not read dropped modpack: {first_error}"));
+            }
+            return;
+        }
+
+        if !errors.is_empty() {
+            self.toasts.warning(format!(
+                "Skipped {} unreadable file{}",
+                errors.len(),
+                plural(errors.len())
+            ));
+        }
+
+        self.modpacks.pending_drop = Some(items);
+    }
+
+    pub(super) fn show_drop_preview_modal(&mut self, context: &egui::Context) {
+        let Some(items) = self.modpacks.pending_drop.as_ref() else {
+            return;
+        };
+
+        let single_diff = if items.len() == 1 {
+            Some(modpack::compute_pack_diff(&items[0].manifest, &self.mods))
+        } else {
+            None
+        };
+
+        let decision = ui::modpacks::show_drop_preview_modal(
+            context,
+            DropPreviewView {
+                items,
+                diff: single_diff.as_ref(),
+                game_version: self.game_version.as_deref(),
+                api_key_configured: self.settings.steam_web_api_key().is_some(),
+                steamcmd_available: workshop::steamcmd_available(self.settings.steamcmd_path()),
+            },
+        );
+
+        let Some(decision) = decision else {
+            return;
+        };
+
+        let Some(items) = self.modpacks.pending_drop.take() else {
+            return;
+        };
+
+        match decision {
+            DropPreviewDecision::Cancel => {}
+            DropPreviewDecision::ImportOnly => {
+                let paths = items.into_iter().map(|item| item.path).collect();
+                self.start_import_archives(paths, false, context);
+            }
+            DropPreviewDecision::ImportAndApply => {
+                let paths = items.into_iter().map(|item| item.path).collect();
+                self.start_import_archives(paths, true, context);
+            }
+        }
+    }
+
     fn begin_pack_editor(&mut self) {
-        match self.pack_editor_from_current() {
+        match self.pack_editor_from_current(PackEditorMode::Create) {
             Some(editor) => self.modpacks.editor = Some(editor),
             None => self.report_action_error("Enable at least one mod before creating a modpack"),
         }
     }
 
-    fn begin_update_pack(&mut self, path: PathBuf) {
-        let Some((name, description, tags, icon, configs, saves)) = self
+    /// Edit metadata or trim mods/configs/saves inside an existing modpack
+    /// WITHOUT replacing its contents with the currently active mod list.
+    fn begin_edit_pack_details(&mut self, path: PathBuf) {
+        let loaded = match modpack::read_instance(&path) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.report_action_error(format!("Could not read modpack: {error}"));
+                return;
+            }
+        };
+
+        let manifest = loaded.manifest;
+        let local_mods = modpack::instance_local_mods(&path, &manifest);
+        let config_files = modpack::instance_configs(&path, &manifest);
+        let saves = modpack::instance_saves(&path, &manifest);
+        let selected_saves = saves
+            .iter()
+            .map(|(file_name, _)| file_name.clone())
+            .collect::<HashSet<_>>();
+
+        self.modpacks.editor = Some(PackEditor {
+            mode: PackEditorMode::EditDetails,
+            name: manifest.name,
+            description: manifest.description,
+            tags_input: manifest.tags.join(", "),
+            mod_search: String::new(),
+            icon: loaded.icon,
+            icon_generation: 0,
+            icon_drop_hovered: false,
+            mods: manifest.mods,
+            local_mods,
+            excluded_mods: HashSet::new(),
+            config_files,
+            excluded_configs: HashSet::new(),
+            saves,
+            selected_saves,
+            organization: manifest.organization,
+            game_version: manifest.game_version,
+            target_path: Some(path),
+            update_diff: None,
+        });
+    }
+
+    /// Explicitly re-capture the current active mods, settings, and saves into
+    /// an existing library modpack while preserving its metadata and icon.
+    fn begin_update_pack_from_active(&mut self, path: PathBuf) {
+        let Some((name, description, tags, icon, configs, saves, diff)) = self
             .modpacks
             .packs
             .iter()
@@ -265,6 +551,7 @@ impl App {
                     pack.icon.clone(),
                     pack.manifest.configs.clone(),
                     pack.manifest.saves.clone(),
+                    modpack::compute_pack_diff(&pack.manifest, &self.mods),
                 )
             })
         else {
@@ -272,7 +559,8 @@ impl App {
             return;
         };
 
-        let Some(mut editor) = self.pack_editor_from_current() else {
+        let Some(mut editor) = self.pack_editor_from_current(PackEditorMode::UpdateFromActive)
+        else {
             self.report_action_error("Enable at least one mod before updating a modpack");
             return;
         };
@@ -282,7 +570,8 @@ impl App {
         editor.tags_input = tags.join(", ");
         editor.icon = icon;
         editor.icon_generation = 0;
-        editor.update_path = Some(path);
+        editor.target_path = Some(path);
+        editor.update_diff = Some(diff);
 
         // Keep the previous settings/save selection when those files still
         // exist, so updating mostly means "capture the current progress".
@@ -310,7 +599,7 @@ impl App {
         self.modpacks.editor = Some(editor);
     }
 
-    fn pack_editor_from_current(&self) -> Option<PackEditor> {
+    fn pack_editor_from_current(&self, mode: PackEditorMode) -> Option<PackEditor> {
         if self.mods.enabled_ids().is_empty() {
             return None;
         }
@@ -345,15 +634,7 @@ impl App {
                         path: format!("mods/{folder_name}"),
                     }
                 }
-                ModSource::Local => {
-                    local_mods.push((folder_name.clone(), rimworld_mod.folder.clone()));
-
-                    PackSource::Local {
-                        remote_url: None,
-                        path: format!("mods/{folder_name}"),
-                    }
-                }
-                ModSource::Unknown => {
+                ModSource::Local | ModSource::Unknown => {
                     local_mods.push((folder_name.clone(), rimworld_mod.folder.clone()));
 
                     PackSource::Local {
@@ -395,11 +676,14 @@ impl App {
             .unwrap_or_default();
 
         Some(PackEditor {
+            mode,
             name: "My modpack".to_owned(),
             description: String::new(),
             tags_input: String::new(),
+            mod_search: String::new(),
             icon: None,
             icon_generation: 0,
+            icon_drop_hovered: false,
             mods,
             local_mods,
             excluded_mods: HashSet::new(),
@@ -409,7 +693,8 @@ impl App {
             selected_saves: HashSet::new(),
             organization,
             game_version: self.game_version.clone(),
-            update_path: None,
+            target_path: None,
+            update_diff: None,
         })
     }
 
@@ -422,11 +707,14 @@ impl App {
             ui::modpacks::show_pack_editor(
                 context,
                 PackEditorView {
+                    mode: editor.mode,
                     name: &mut editor.name,
                     description: &mut editor.description,
                     tags_input: &mut editor.tags_input,
+                    mod_search: &mut editor.mod_search,
                     icon: editor.icon.as_ref(),
                     icon_generation: editor.icon_generation,
+                    icon_drop_hovered: editor.icon_drop_hovered,
                     mods: &editor.mods,
                     excluded_mods: &mut editor.excluded_mods,
                     config_files: &editor.config_files,
@@ -434,7 +722,7 @@ impl App {
                     saves: &editor.saves,
                     selected_saves: &mut editor.selected_saves,
                     game_version: editor.game_version.as_deref(),
-                    updating: editor.update_path.is_some(),
+                    update_diff: editor.update_diff.as_ref(),
                 },
             )
         };
@@ -465,7 +753,11 @@ impl App {
             return;
         };
 
-        let bytes = match fs::read(&path) {
+        self.apply_icon_from_path(&path);
+    }
+
+    fn apply_icon_from_path(&mut self, path: &Path) {
+        let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 self.report_action_error(format!(
@@ -487,6 +779,7 @@ impl App {
         if let Some(editor) = self.modpacks.editor.as_mut() {
             editor.icon = Some(Arc::from(icon));
             editor.icon_generation = editor.icon_generation.wrapping_add(1);
+            self.toasts.success("Modpack icon updated");
         }
 
         self.clear_action_error();
@@ -534,7 +827,7 @@ impl App {
         let included_folders = included_mods
             .iter()
             .filter(|pack_mod| pack_mod.is_local())
-            .map(|pack_mod| pack_mod.folder_name.as_str())
+            .map(|pack_mod| modpack::sanitize_component(&pack_mod.folder_name))
             .collect::<HashSet<_>>();
         let local_mods = editor
             .local_mods
@@ -578,8 +871,8 @@ impl App {
             .map(|(package_id, organization)| (package_id.clone(), organization.clone()))
             .collect();
 
-        let updating = editor.update_path.is_some();
-        let destination = match editor.update_path.clone() {
+        let mode = editor.mode;
+        let destination = match editor.target_path.clone() {
             Some(destination) => {
                 let in_library = modpack::library_directory()
                     .as_deref()
@@ -605,12 +898,12 @@ impl App {
 
         let icon = editor.icon.clone();
         let destination_for_task = destination.clone();
-        let title = if updating {
-            "Saving modpack changes".to_owned()
-        } else {
-            "Saving modpack".to_owned()
+        let title = match mode {
+            PackEditorMode::Create => "Saving modpack".to_owned(),
+            PackEditorMode::EditDetails => "Saving modpack details".to_owned(),
+            PackEditorMode::UpdateFromActive => "Updating modpack".to_owned(),
         };
-        let step = format!("Copying files into {}…", manifest.name);
+        let step = format!("Writing {}…", manifest.name);
 
         self.spawn_pack_task(context, title, step, move |sender, progress| {
             let result = (|| -> io::Result<PackSummary> {
@@ -629,25 +922,62 @@ impl App {
                     &mut report,
                 )?;
 
-                let loaded = modpack::read_instance(&destination_for_task)?;
-
-                Ok(PackSummary {
-                    path: destination_for_task,
-                    manifest: loaded.manifest,
-                    icon: loaded.icon,
-                })
+                modpack::read_instance_summary(&destination_for_task)
             })()
             .map_err(|error| error.to_string());
 
-            let _ = if updating {
-                sender.send(PackTaskResult::Updated(result))
-            } else {
-                sender.send(PackTaskResult::Created(result))
+            let _ = match mode {
+                PackEditorMode::Create => sender.send(PackTaskResult::Created(result)),
+                PackEditorMode::EditDetails => sender.send(PackTaskResult::Updated {
+                    result,
+                    from_active: false,
+                }),
+                PackEditorMode::UpdateFromActive => sender.send(PackTaskResult::Updated {
+                    result,
+                    from_active: true,
+                }),
             };
         });
     }
 
-    fn import_pack(&mut self, context: &egui::Context) {
+    fn duplicate_pack(&mut self, source: PathBuf, context: &egui::Context) {
+        if self.pack_busy_label().is_some() {
+            self.toasts
+                .info("Wait for the current modpack task to finish first");
+            return;
+        }
+
+        let base_name = self
+            .modpacks
+            .packs
+            .iter()
+            .find(|pack| paths_equal(&pack.path, &source))
+            .map_or_else(|| "Modpack".to_owned(), |pack| pack.manifest.name.clone());
+        let new_name = format!("{base_name} (Copy)");
+
+        let destination = match modpack::unique_instance_path(&new_name) {
+            Ok(path) => path,
+            Err(error) => {
+                self.report_action_error(format!("Could not duplicate modpack: {error}"));
+                return;
+            }
+        };
+
+        self.spawn_pack_task(
+            context,
+            "Duplicating modpack".to_owned(),
+            format!("Copying {base_name}…"),
+            move |sender, progress| {
+                progress.set(0.3);
+                let result = modpack::duplicate_instance(&source, &destination, &new_name)
+                    .map_err(|error| error.to_string());
+                progress.set(1.0);
+                let _ = sender.send(PackTaskResult::Duplicated(result));
+            },
+        );
+    }
+
+    fn import_pack_from_dialog(&mut self, context: &egui::Context) {
         if self.pack_busy_label().is_some() {
             self.toasts
                 .info("Wait for the current modpack task to finish first");
@@ -662,46 +992,68 @@ impl App {
             return;
         };
 
-        let manifest = match modpack::read_archive_manifest(&source) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                self.report_action_error(format!("Could not import modpack: {error}"));
-                return;
-            }
-        };
+        self.start_import_archives(vec![source], false, context);
+    }
 
-        let destination = match modpack::unique_instance_path(&manifest.name) {
-            Ok(destination) => destination,
-            Err(error) => {
-                self.report_action_error(format!("Could not import modpack: {error}"));
-                return;
-            }
-        };
+    fn start_import_archives(
+        &mut self,
+        sources: Vec<PathBuf>,
+        apply_after: bool,
+        context: &egui::Context,
+    ) {
+        if self.pack_busy_label().is_some() {
+            self.toasts
+                .info("Wait for the current modpack task to finish first");
+            return;
+        }
 
-        let name = manifest.name.clone();
+        if sources.is_empty() {
+            return;
+        }
+
+        let count = sources.len();
+        let title = if count == 1 {
+            "Importing modpack".to_owned()
+        } else {
+            format!("Importing {count} modpacks")
+        };
 
         self.spawn_pack_task(
             context,
-            "Importing modpack".to_owned(),
-            format!("Reading {name}…"),
+            title,
+            "Reading .rimpack archive…".to_owned(),
             move |sender, progress| {
-                let result = (|| -> io::Result<PackSummary> {
-                    progress.set_label(format!("Extracting {name}…"));
-                    let mut report = |fraction| progress.set(fraction);
+                let result = (|| -> io::Result<Vec<PackSummary>> {
+                    let mut imported = Vec::with_capacity(count);
 
-                    modpack::import_archive(&source, &destination, &mut report)?;
-                    progress.set_label("Reading imported modpack…");
-                    let loaded = modpack::read_instance(&destination)?;
+                    for (index, source) in sources.iter().enumerate() {
+                        let manifest = modpack::read_archive_manifest(source)?;
+                        let destination = modpack::unique_instance_path(&manifest.name)?;
+                        let name = manifest.name.clone();
 
-                    Ok(PackSummary {
-                        path: destination,
-                        manifest: loaded.manifest,
-                        icon: loaded.icon,
-                    })
+                        progress.set_label(if count == 1 {
+                            format!("Extracting {name}…")
+                        } else {
+                            format!("Extracting {name} ({}/{count})…", index + 1)
+                        });
+
+                        let mut report = |fraction: f32| {
+                            let overall = (index as f32 + fraction) / count as f32;
+                            progress.set(overall);
+                        };
+
+                        modpack::import_archive(source, &destination, &mut report)?;
+                        imported.push(modpack::read_instance_summary(&destination)?);
+                    }
+
+                    Ok(imported)
                 })()
                 .map_err(|error| error.to_string());
 
-                let _ = sender.send(PackTaskResult::Imported(result));
+                let _ = sender.send(PackTaskResult::Imported {
+                    result,
+                    apply_after,
+                });
             },
         );
     }
@@ -759,7 +1111,12 @@ impl App {
         );
     }
 
-    fn start_apply_pack(&mut self, path: PathBuf, overwrite_saves: bool, context: &egui::Context) {
+    fn start_apply_pack(
+        &mut self,
+        path: PathBuf,
+        options: PackApplyOptions,
+        context: &egui::Context,
+    ) {
         if self.pack_busy_label().is_some() {
             self.toasts
                 .info("Wait for the current modpack task to finish first");
@@ -802,12 +1159,12 @@ impl App {
             move |sender, progress| {
                 let result = (|| -> Result<ApplyOutcome, String> {
                     let mut apply_report = |fraction: f32| progress.set(fraction * 0.6);
-                    let applied = modpack::apply_instance(
+                    let applied = modpack::apply_instance_with_options(
                         &path,
                         &mods_root,
                         &config_root,
                         &saves_root,
-                        overwrite_saves,
+                        options,
                         &mut apply_report,
                     )
                     .map_err(|error| error.to_string())?;
@@ -939,6 +1296,7 @@ impl App {
                     progress.set(0.99);
 
                     Ok(ApplyOutcome {
+                        pack_path: path,
                         applied,
                         installed_workshop_mods,
                         subscribed_workshop_mods,
@@ -1001,85 +1359,150 @@ impl App {
     }
 
     fn finish_pack_task(&mut self, task: PackTaskResult, context: &egui::Context) {
-        let dialog = match task {
+        let dialog: Option<PackResultDialog> = match task {
             PackTaskResult::Created(result) => match result {
                 Ok(pack) => {
+                    let diff = modpack::compute_pack_diff(&pack.manifest, &self.mods);
+                    if diff.is_in_sync() {
+                        self.modpacks.active_pack = Some(pack.path.clone());
+                    }
+                    let name = pack.manifest.name.clone();
+                    let mod_count = pack.manifest.mods.len();
+                    self.modpacks.selected = Some(pack.path);
                     self.refresh_pack_library();
-                    self.modpacks.selected = Some(pack.path.clone());
                     self.clear_action_error();
-                    PackResultDialog::success(
-                        "Modpack saved",
-                        pack_summary_lines(&pack.manifest, Some(&pack.path)),
-                    )
+                    self.toasts.success(format!(
+                        "Saved modpack \"{name}\" ({mod_count} mod{})",
+                        plural(mod_count)
+                    ));
+                    None
                 }
                 Err(error) => {
                     self.refresh_pack_library();
                     self.action_error = Some(format!("Could not save modpack: {error}"));
-                    PackResultDialog::failure("Could not save modpack", error)
+                    Some(PackResultDialog::failure("Could not save modpack", error))
                 }
             },
-            PackTaskResult::Updated(result) => match result {
+            PackTaskResult::Updated {
+                result,
+                from_active,
+            } => match result {
                 Ok(pack) => {
+                    if from_active {
+                        let diff = modpack::compute_pack_diff(&pack.manifest, &self.mods);
+                        if diff.is_in_sync() {
+                            self.modpacks.active_pack = Some(pack.path.clone());
+                        }
+                    }
+                    let name = pack.manifest.name.clone();
+                    self.modpacks.selected = Some(pack.path);
                     self.refresh_pack_library();
-                    self.modpacks.selected = Some(pack.path.clone());
                     self.clear_action_error();
-                    PackResultDialog::success(
-                        "Modpack changes saved",
-                        pack_summary_lines(&pack.manifest, Some(&pack.path)),
-                    )
+                    self.toasts.success(if from_active {
+                        format!("Updated \"{name}\" from active mods")
+                    } else {
+                        format!("Saved details for \"{name}\"")
+                    });
+                    None
                 }
                 Err(error) => {
                     self.refresh_pack_library();
                     self.action_error = Some(format!("Could not save modpack changes: {error}"));
-                    PackResultDialog::failure("Could not save modpack changes", error)
+                    Some(PackResultDialog::failure(
+                        "Could not save modpack changes",
+                        error,
+                    ))
                 }
             },
-            PackTaskResult::Imported(result) => match result {
+            PackTaskResult::Duplicated(result) => match result {
                 Ok(pack) => {
+                    let name = pack.manifest.name.clone();
+                    self.modpacks.selected = Some(pack.path);
                     self.refresh_pack_library();
-                    self.modpacks.selected = Some(pack.path.clone());
                     self.clear_action_error();
-                    PackResultDialog::success(
-                        "Modpack imported",
-                        pack_summary_lines(&pack.manifest, Some(&pack.path)),
-                    )
+                    self.toasts.success(format!("Duplicated as \"{name}\""));
+                    None
+                }
+                Err(error) => {
+                    self.refresh_pack_library();
+                    self.action_error = Some(format!("Could not duplicate modpack: {error}"));
+                    Some(PackResultDialog::failure(
+                        "Could not duplicate modpack",
+                        error,
+                    ))
+                }
+            },
+            PackTaskResult::Imported {
+                result,
+                apply_after,
+            } => match result {
+                Ok(packs) => {
+                    self.refresh_pack_library();
+                    self.clear_action_error();
+
+                    if let Some(last) = packs.last() {
+                        self.modpacks.selected = Some(last.path.clone());
+                    }
+
+                    if apply_after && packs.len() == 1 {
+                        let path = packs[0].path.clone();
+                        self.start_apply_pack(path, PackApplyOptions::default(), context);
+                        return;
+                    }
+
+                    self.current_tab = AppTab::Modpacks;
+
+                    if packs.len() == 1 {
+                        self.toasts
+                            .success(format!("Imported modpack \"{}\"", packs[0].manifest.name));
+                    } else {
+                        self.toasts
+                            .success(format!("Imported {} modpacks", packs.len()));
+                    }
+                    None
                 }
                 Err(error) => {
                     self.action_error = Some(format!("Could not import modpack: {error}"));
-                    PackResultDialog::failure("Could not import modpack", error)
+                    Some(PackResultDialog::failure("Could not import modpack", error))
                 }
             },
             PackTaskResult::Exported(result) => match result {
                 Ok(path) => {
                     self.clear_action_error();
-                    PackResultDialog::success(
-                        "Modpack exported",
-                        vec![format!("Saved to {}", path.display())],
-                    )
+                    self.modpacks.last_exported_folder = path.parent().map(Path::to_path_buf);
+                    let file_name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("modpack.rimpack");
+                    self.toasts
+                        .success(format!("Exported {file_name} — click to open folder"))
+                        .click_action(open_exported_pack_folder_action());
+                    None
                 }
                 Err(error) => {
                     self.action_error = Some(format!("Could not export modpack: {error}"));
-                    PackResultDialog::failure("Could not export modpack", error)
+                    Some(PackResultDialog::failure("Could not export modpack", error))
                 }
             },
             PackTaskResult::Applied(result) => match result {
                 Ok(outcome) => self.finish_applying_pack(*outcome, context),
                 Err(error) => {
                     self.action_error = Some(format!("Could not apply modpack: {error}"));
-                    PackResultDialog::failure("Could not apply modpack", error)
+                    Some(PackResultDialog::failure("Could not apply modpack", error))
                 }
             },
         };
 
-        self.modpacks.result = Some(dialog);
+        self.modpacks.result = dialog;
     }
 
     fn finish_applying_pack(
         &mut self,
         outcome: ApplyOutcome,
         context: &egui::Context,
-    ) -> PackResultDialog {
+    ) -> Option<PackResultDialog> {
         let ApplyOutcome {
+            pack_path,
             applied,
             installed_workshop_mods,
             subscribed_workshop_mods,
@@ -1095,7 +1518,10 @@ impl App {
                 let message =
                     format!("Modpack files were copied, but mods could not be reloaded: {error}");
                 self.action_error = Some(message.clone());
-                return PackResultDialog::failure("Could not finish applying modpack", message);
+                return Some(PackResultDialog::failure(
+                    "Could not finish applying modpack",
+                    message,
+                ));
             }
         };
 
@@ -1158,6 +1584,7 @@ impl App {
         self.mods = report.mods;
         self.mod_load_warnings = report.warnings;
         self.load_order_status = LoadOrderStatus::Ready;
+        self.modpacks.active_pack = Some(pack_path);
         self.clear_mod_selection();
         self.clear_load_order_history();
 
@@ -1260,12 +1687,12 @@ impl App {
                 reason: message.clone(),
             };
 
-            return PackResultDialog {
+            return Some(PackResultDialog {
                 title: "Could not finish applying modpack".to_owned(),
                 success: false,
                 lines,
                 warnings,
-            };
+            });
         }
 
         if !pending_workshop_mods.is_empty() {
@@ -1388,15 +1815,20 @@ impl App {
             warnings.push(warning);
         }
 
-        PackResultDialog {
-            title: if warnings.is_empty() {
-                "Modpack applied".to_owned()
-            } else {
-                "Modpack applied with warnings".to_owned()
-            },
-            success: true,
-            lines,
-            warnings,
+        if warnings.is_empty() {
+            self.toasts.success(format!(
+                "Applied \"{}\" ({} mods enabled)",
+                applied.manifest.name,
+                enabled_package_ids.len()
+            ));
+            None
+        } else {
+            Some(PackResultDialog {
+                title: "Modpack applied with warnings".to_owned(),
+                success: true,
+                lines,
+                warnings,
+            })
         }
     }
 
@@ -1582,18 +2014,27 @@ impl App {
             self.modpacks.selected = None;
         }
 
+        if self
+            .modpacks
+            .active_pack
+            .as_ref()
+            .is_some_and(|active| paths_equal(active, path))
+        {
+            self.modpacks.active_pack = None;
+        }
+
         self.refresh_pack_library();
         self.clear_action_error();
         self.toasts.success(format!("Deleted modpack \"{name}\""));
     }
 
     pub(super) fn show_pack_apply_confirmation(&mut self, context: &egui::Context) {
-        let Some(pending) = self.modpacks.pending_apply.as_ref() else {
+        let Some(pending) = self.modpacks.pending_apply.as_mut() else {
             return;
         };
 
         let path = pending.path.clone();
-        let mut overwrite_saves = pending.overwrite_saves;
+        let mut options = pending.options;
 
         let Some(pack) = self
             .modpacks
@@ -1605,164 +2046,35 @@ impl App {
             return;
         };
 
-        let name = pack.manifest.name.clone();
-        let mod_count = pack.manifest.mods.len();
-        let local_count = pack
-            .manifest
-            .mods
-            .iter()
-            .filter(|pack_mod| pack_mod.is_local())
-            .count();
-        let workshop_count = pack
-            .manifest
-            .mods
-            .iter()
-            .filter(|pack_mod| pack_mod.workshop_url().is_some())
-            .count();
-        let workshop_path = self.settings.workshop_path();
-        let steamcmd_workshop_path =
-            workshop::steamcmd_workshop_path(self.settings.steamcmd_path());
-        let missing_workshop_count = pack
-            .manifest
-            .mods
-            .iter()
-            .filter_map(PackMod::workshop_id)
-            .filter(|workshop_id| {
-                !workshop::is_item_installed(
-                    workshop_path,
-                    steamcmd_workshop_path.as_deref(),
-                    *workshop_id,
-                )
-            })
-            .count();
-        let config_count = pack.manifest.configs.len();
-        let save_count = pack.manifest.saves.len();
+        let diff = modpack::compute_pack_diff(&pack.manifest, &self.mods);
         let api_key_configured = self.settings.steam_web_api_key().is_some();
         let steamcmd_available = workshop::steamcmd_available(self.settings.steamcmd_path());
 
-        let mut apply = false;
-        let mut cancel = false;
+        let decision = ui::modpacks::show_apply_diff_modal(
+            context,
+            ApplyDiffView {
+                pack,
+                diff: &diff,
+                game_version: self.game_version.as_deref(),
+                api_key_configured,
+                steamcmd_available,
+                options: &mut options,
+            },
+        );
 
-        let response = egui::Modal::new(egui::Id::new("apply_modpack")).show(context, |ui| {
-            ui.set_width(500.0);
-
-            ui.horizontal(|ui| {
-                ui::theme::chip(ui, "Apply", ui::theme::ACCENT);
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new("Apply modpack?")
-                        .text_style(ui::theme::title_style())
-                        .color(ui::theme::TEXT),
-                );
-            });
-
-            ui.add_space(12.0);
-
-            ui::theme::group().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-
-                ui.label(
-                    egui::RichText::new(format!(
-                        "\"{name}\" will replace the current active mod list with {mod_count} mods."
-                    ))
-                    .color(ui::theme::TEXT),
-                );
-
-                ui.add_space(8.0);
-
-                ui.horizontal_wrapped(|ui| {
-                    if local_count > 0 {
-                        ui::theme::chip(ui, format!("{local_count} local"), ui::theme::TEXT_MUTED);
-                    }
-
-                    if workshop_count > 0 {
-                        ui::theme::chip(
-                            ui,
-                            format!("{workshop_count} Workshop"),
-                            ui::theme::TEXT_MUTED,
-                        );
-                    }
-
-                    if missing_workshop_count > 0 {
-                        let can_download = api_key_configured || steamcmd_available;
-                        ui::theme::chip(
-                            ui,
-                            format!("{missing_workshop_count} to download"),
-                            if can_download {
-                                ui::theme::TEXT_MUTED
-                            } else {
-                                ui::theme::WARNING
-                            },
-                        );
-                    }
-
-                    if config_count > 0 {
-                        ui::theme::chip(
-                            ui,
-                            format!("{config_count} settings file{}", plural(config_count)),
-                            ui::theme::TEXT_MUTED,
-                        );
-                    }
-
-                    if save_count > 0 {
-                        ui::theme::chip(
-                            ui,
-                            format!("{save_count} save{}", plural(save_count)),
-                            ui::theme::TEXT_MUTED,
-                        );
-                    }
-                });
-
-                if missing_workshop_count > 0 && !api_key_configured && !steamcmd_available {
-                    ui.add_space(6.0);
-                    ui::theme::hint(
-                        ui,
-                        "Set up a Steam Web API key or SteamCMD to download missing Workshop mods.",
-                    );
-                }
-
-                if save_count > 0 {
-                    ui.add_space(8.0);
-                    ui::theme::checkbox(
-                        ui,
-                        &mut overwrite_saves,
-                        "Replace existing saves with the same name",
-                    );
-                    ui::theme::hint(
-                        ui,
-                        "Off by default so applying an update cannot erase newer progress.",
-                    );
-                }
-            });
-
-            ui.add_space(8.0);
-            ui::theme::hint(
-                ui,
-                "ModsConfig.xml is backed up before the load order changes.",
-            );
-
-            ui.add_space(12.0);
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui::theme::primary_button(ui, "Apply").clicked() {
-                    apply = true;
-                }
-
-                if ui::theme::secondary_button(ui, "Cancel").clicked() {
-                    cancel = true;
-                }
-            });
-        });
-
-        if response.should_close() {
-            cancel = true;
+        if let Some(pending) = self.modpacks.pending_apply.as_mut() {
+            pending.options = options;
         }
 
-        if apply {
-            self.modpacks.pending_apply = None;
-            self.start_apply_pack(path, overwrite_saves, context);
-        } else if cancel {
-            self.modpacks.pending_apply = None;
+        match decision {
+            Some(ApplyDiffDecision::Apply) => {
+                self.modpacks.pending_apply = None;
+                self.start_apply_pack(path, options, context);
+            }
+            Some(ApplyDiffDecision::Cancel) => {
+                self.modpacks.pending_apply = None;
+            }
+            None => {}
         }
     }
 
@@ -1830,26 +2142,6 @@ fn unique_folder_name(raw: &str, used: &mut HashSet<String>) -> String {
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
     left == right
-}
-
-fn pack_summary_lines(manifest: &ModpackManifest, path: Option<&Path>) -> Vec<String> {
-    let mut lines = vec![
-        format!("Name: {}", manifest.name),
-        format!(
-            "{} mods · {} settings file{} · {} save{}",
-            manifest.mods.len(),
-            manifest.configs.len(),
-            plural(manifest.configs.len()),
-            manifest.saves.len(),
-            plural(manifest.saves.len())
-        ),
-    ];
-
-    if let Some(path) = path {
-        lines.push(format!("Instance: {}", path.display()));
-    }
-
-    lines
 }
 
 fn summarize_names(names: &[String]) -> String {
