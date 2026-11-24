@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Download</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#285ea1"/>
+      <stop offset="100%" stop-color="#173966"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <path fill="#cce5ff" d="M10.6 4.7 H13.4 V10.2 H16.6 L12 14.8 L7.4 10.2 H10.6 Z"/>
+  <path fill="#cce5ff" d="M5.4 14.4 H7.7 V17.0 H16.3 V14.4 H18.6 V19.3 H5.4 Z"/>
+</svg>
