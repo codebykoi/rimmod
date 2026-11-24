@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 pub(crate) mod assembly_metadata;
 pub(crate) mod dependency_inference;
+pub(crate) mod file_association;
 pub(crate) mod fuzzy_search;
 pub(crate) mod load_order;
 pub(crate) mod log_analysis;

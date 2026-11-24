@@ -4,6 +4,7 @@ mod services;
 mod ui;
 
 use crate::app::App;
+use crate::services::file_association;
 use crate::services::updater::{self, StartupMode};
 
 const APP_TITLE: &str = concat!("RimMod ", env!("CARGO_PKG_VERSION"));
@@ -19,12 +20,14 @@ fn main() -> eframe::Result {
     };
 
     updater::cleanup_after_update(startup_notice.cleanup_updater.clone());
+    file_association::register_rimpack_icon();
 
     let viewport = match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
         Ok(icon) => eframe::egui::ViewportBuilder::default().with_icon(icon),
         Err(_) => eframe::egui::ViewportBuilder::default(),
     }
     .with_decorations(false)
+    .with_drag_and_drop(true)
     .with_min_inner_size([1000.0, 640.0]);
     let surface_config = eframe::SurfaceConfig {
         present_mode: eframe::wgpu::PresentMode::Fifo,
