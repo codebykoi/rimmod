@@ -71,6 +71,7 @@ impl App {
                 self.mod_load_warnings = report.warnings;
                 self.load_order_status = LoadOrderStatus::Ready;
                 self.clear_load_order_history();
+                self.logs.invalidate();
                 self.state.selected_mod_ids = selected_package_ids
                     .iter()
                     .filter_map(|package_id| self.mods.find_id_by_package_id(package_id))

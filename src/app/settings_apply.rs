@@ -91,6 +91,7 @@ impl App {
         self.load_order_status = LoadOrderStatus::Ready;
         self.clear_mod_selection();
         self.clear_load_order_history();
+        self.logs.invalidate();
 
         Ok(())
     }
