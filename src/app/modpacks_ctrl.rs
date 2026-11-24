@@ -82,7 +82,7 @@ enum PackTaskResult {
     Updated(Result<PackSummary, String>),
     Imported(Result<PackSummary, String>),
     Exported(Result<PathBuf, String>),
-    Applied(Result<ApplyOutcome, String>),
+    Applied(Result<Box<ApplyOutcome>, String>),
 }
 
 struct ApplyOutcome {
@@ -949,7 +949,7 @@ impl App {
                     })
                 })();
 
-                let _ = sender.send(PackTaskResult::Applied(result));
+                let _ = sender.send(PackTaskResult::Applied(result.map(Box::new)));
             },
         );
     }
@@ -1063,7 +1063,7 @@ impl App {
                 }
             },
             PackTaskResult::Applied(result) => match result {
-                Ok(outcome) => self.finish_applying_pack(outcome, context),
+                Ok(outcome) => self.finish_applying_pack(*outcome, context),
                 Err(error) => {
                     self.action_error = Some(format!("Could not apply modpack: {error}"));
                     PackResultDialog::failure("Could not apply modpack", error)
