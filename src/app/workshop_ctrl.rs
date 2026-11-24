@@ -145,13 +145,14 @@ impl App {
             self.start_workshop_query(1, context);
         }
 
-        self.start_subscription_load(context);
+        self.ensure_subscriptions_started(context);
     }
 
     /// A settings change can add a Web API key or point at another Workshop
     /// folder, so the Workshop reloads its data on the next visit.
     pub(super) fn reset_workshop_data(&mut self) {
         self.workshop.started = false;
+        self.workshop.covered_mods = CoveredModsStatus::NotRequested;
         self.workshop.subscriptions = SubscriptionStatus::NotLoaded;
         self.workshop.subscribed_items.clear();
         self.workshop.subscribed_load = WorkshopLoadStatus::Idle;
@@ -171,12 +172,13 @@ impl App {
         }
 
         let context = context.clone();
+        let game_version = self.game_version.clone();
         let (sender, receiver) = mpsc::channel();
 
         self.workshop.covered_mods = CoveredModsStatus::Loading(receiver);
 
         std::thread::spawn(move || {
-            let result = no_version_warning::fetch_covered_mods();
+            let result = no_version_warning::fetch_covered_mods(game_version.as_deref());
             let _ = sender.send(result);
             context.request_repaint();
         });
@@ -255,6 +257,14 @@ impl App {
         self.start_workshop_query(1, context);
     }
 
+    /// Load the account's subscriptions as soon as the Mods tab needs them,
+    /// so its rows can tell subscribed Workshop mods apart.
+    pub(super) fn ensure_subscriptions_started(&mut self, context: &egui::Context) {
+        if matches!(self.workshop.subscriptions, SubscriptionStatus::NotLoaded) {
+            self.start_subscription_load(context);
+        }
+    }
+
     pub(super) fn start_subscription_load(&mut self, context: &egui::Context) {
         if matches!(self.workshop.subscriptions, SubscriptionStatus::Loading) {
             return;
@@ -292,7 +302,7 @@ impl App {
 
         let Some(api_key) = self.settings.steam_web_api_key().map(str::to_owned) else {
             self.report_action_error(
-                "Add a Steam Web API key in Settings before subscribing to Workshop items",
+                "Add a Steam Web API key in Settings to subscribe or unsubscribe",
             );
             return;
         };

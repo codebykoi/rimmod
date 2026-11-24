@@ -4,7 +4,7 @@ use std::path::Path;
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Sense, Vec2};
 
 use crate::models::{
-    ModCollection, ModSource, RimworldMod, highest_supported_version, major_minor_version_text,
+    ModCollection, ModSource, RimworldMod, major_minor_version_text, newest_known_version,
     versions_are_compatible,
 };
 use crate::services::no_version_warning::CoveredMods;
@@ -13,6 +13,7 @@ use crate::services::workshop::{
     format_date, is_item_installed, strip_bbcode,
 };
 use crate::ui::OpenTarget;
+use crate::ui::icons::{INLINE_ICON_SCALE, no_version_warning_icon};
 use crate::ui::mod_info::show_supported_versions;
 use crate::ui::theme;
 
@@ -301,13 +302,20 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                 sort_changed = true;
                             }
 
-                            let clear_clicked = !query_is_empty && ui.button("Clear").clicked();
+                            let clear_clicked = !query_is_empty
+                                && theme::secondary_button_sized(
+                                    ui,
+                                    "Clear",
+                                    Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                                )
+                                .clicked();
 
                             let enabled = api_key_configured
                                 && !matches!(load_status, WorkshopLoadStatus::Loading);
 
                             let search_clicked = ui
-                                .add_enabled(enabled, egui::Button::new("Search"))
+                                .add_enabled_ui(enabled, |ui| theme::primary_button(ui, "Search"))
+                                .inner
                                 .on_disabled_hover_text(if api_key_configured {
                                     "A search is already running"
                                 } else {
@@ -437,8 +445,15 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
                                 }
                             });
 
-                        let refresh =
-                            ui.add_enabled(!subscriptions_loading, egui::Button::new("Refresh"));
+                        let refresh = ui
+                            .add_enabled_ui(!subscriptions_loading, |ui| {
+                                theme::secondary_button_sized(
+                                    ui,
+                                    "Refresh",
+                                    Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                                )
+                            })
+                            .inner;
 
                         if refresh.clicked() {
                             action = Some(WorkshopAction::RefreshSubscriptions);
@@ -564,31 +579,11 @@ pub(crate) fn show_workshop(ui: &mut egui::Ui, view: WorkshopView<'_>) -> Option
 
 /// The Workshop page uses square controls and surfaces throughout.
 fn apply_workshop_style(ui: &mut egui::Ui) {
-    let visuals = ui.visuals_mut();
-
-    for widget in [
-        &mut visuals.widgets.noninteractive,
-        &mut visuals.widgets.inactive,
-        &mut visuals.widgets.hovered,
-        &mut visuals.widgets.active,
-        &mut visuals.widgets.open,
-    ] {
-        widget.corner_radius = CornerRadius::ZERO;
-    }
-
-    visuals.window_corner_radius = CornerRadius::ZERO;
-    visuals.menu_corner_radius = CornerRadius::ZERO;
+    theme::apply_square_style(ui);
 }
 
 fn chip(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) -> egui::Response {
-    egui::Frame::new()
-        .fill(theme::tint(color, 34))
-        .corner_radius(CornerRadius::ZERO)
-        .inner_margin(Margin::symmetric(6, 2))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text.into()).small().color(color))
-        })
-        .response
+    theme::chip_with_corner_radius(ui, text, color, CornerRadius::ZERO)
 }
 
 fn show_key_notice(ui: &mut egui::Ui, api_key_configured: bool) -> Option<WorkshopAction> {
@@ -774,7 +769,7 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
     if ui
         .add_enabled(
             game_version.is_some(),
-            egui::Checkbox::new(&mut my_version, version_label),
+            theme::Checkbox::new(&mut my_version, version_label),
         )
         .on_disabled_hover_text("RimWorld's version is not known yet")
         .changed()
@@ -785,31 +780,27 @@ fn show_sidebar(ui: &mut egui::Ui, state: SidebarState<'_>) -> SidebarOutcome {
 
     ui.add_space(4.0);
 
-    egui::CollapsingHeader::new("Game version")
-        .default_open(true)
-        .show(ui, |ui| {
-            for version in RIMWORLD_VERSIONS {
-                let mut selected = versions.iter().any(|candidate| candidate == version);
+    theme::collapsible(ui, "workshop_game_version", "Game version", true, |ui| {
+        for version in RIMWORLD_VERSIONS {
+            let mut selected = versions.iter().any(|candidate| candidate == version);
 
-                if ui.checkbox(&mut selected, *version).changed() {
-                    toggle_value(versions, version);
-                    outcome.filters_changed = true;
-                }
+            if theme::checkbox(ui, &mut selected, *version).changed() {
+                toggle_value(versions, version);
+                outcome.filters_changed = true;
             }
-        });
+        }
+    });
 
-    egui::CollapsingHeader::new("Required DLC")
-        .default_open(true)
-        .show(ui, |ui| {
-            for dlc_tag in RIMWORLD_DLC {
-                let mut selected = dlc.iter().any(|candidate| candidate == dlc_tag);
+    theme::collapsible(ui, "workshop_required_dlc", "Required DLC", true, |ui| {
+        for dlc_tag in RIMWORLD_DLC {
+            let mut selected = dlc.iter().any(|candidate| candidate == dlc_tag);
 
-                if ui.checkbox(&mut selected, *dlc_tag).changed() {
-                    toggle_value(dlc, dlc_tag);
-                    outcome.filters_changed = true;
-                }
+            if theme::checkbox(ui, &mut selected, *dlc_tag).changed() {
+                toggle_value(dlc, dlc_tag);
+                outcome.filters_changed = true;
             }
-        });
+        }
+    });
 
     if tab == WorkshopTab::Subscribed {
         theme::hint(
@@ -1140,9 +1131,23 @@ fn show_card(
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.set_min_size(Vec2::new(inner_width, CARD_VERSION_HEIGHT));
+                        ui.spacing_mut().item_spacing.x = 4.0;
 
-                        if let Some((label, color, hover)) = badge {
-                            chip(ui, label, color).on_hover_text(hover);
+                        if let Some(badge) = badge {
+                            if badge.community_report {
+                                let icon_size = Vec2::splat(
+                                    ui.text_style_height(&egui::TextStyle::Body)
+                                        * INLINE_ICON_SCALE,
+                                );
+                                ui.add(
+                                    egui::Image::new(no_version_warning_icon())
+                                        .fit_to_exact_size(icon_size)
+                                        .sense(Sense::hover()),
+                                )
+                                .on_hover_text(&badge.hover);
+                            }
+
+                            chip(ui, badge.label, badge.color).on_hover_text(&badge.hover);
                         }
                     },
                 );
@@ -1257,60 +1262,81 @@ fn versions_for_item<'a>(
     item: &'a WorkshopItem,
     context: &'a ItemContext<'a>,
 ) -> (&'a [String], &'a [String]) {
-    if let Some(installed_mod) = installed_workshop_mod(context.mods, item.published_file_id) {
-        return (
-            installed_mod.supported_versions.as_slice(),
-            installed_mod.community_supported_versions.as_slice(),
-        );
-    }
-
-    let community = context
+    let remote_community = context
         .covered_mods
         .ready_mods()
         .and_then(|covered_mods| covered_mods.get(&item.published_file_id))
         .map(Vec::as_slice)
         .unwrap_or(&[]);
 
-    (item.supported_versions.as_slice(), community)
+    if let Some(installed_mod) = installed_workshop_mod(context.mods, item.published_file_id) {
+        let community = if installed_mod.community_supported_versions.is_empty() {
+            remote_community
+        } else {
+            installed_mod.community_supported_versions.as_slice()
+        };
+
+        return (installed_mod.supported_versions.as_slice(), community);
+    }
+
+    (item.supported_versions.as_slice(), remote_community)
+}
+
+#[derive(Debug, PartialEq)]
+struct CardVersionBadge {
+    label: String,
+    color: Color32,
+    hover: String,
+    community_report: bool,
 }
 
 fn card_version_badge(
     supported: &[String],
     community: &[String],
     game_version: Option<&str>,
-) -> Option<(String, Color32, String)> {
+) -> Option<CardVersionBadge> {
     let game_version = game_version?;
 
     if let Some(version) = supported
         .iter()
         .find(|version| versions_are_compatible(version, game_version))
     {
-        return Some((
-            major_minor_version_text(version).unwrap_or_else(|| version.clone()),
-            theme::SUCCESS,
-            format!("Lists {version}, which matches your game version"),
-        ));
+        return Some(CardVersionBadge {
+            label: major_minor_version_text(version).unwrap_or_else(|| version.clone()),
+            color: theme::SUCCESS,
+            hover: format!("Lists {version}, which matches your game version"),
+            community_report: false,
+        });
     }
 
     if let Some(version) = community
         .iter()
         .find(|version| versions_are_compatible(version, game_version))
     {
-        return Some((
-            major_minor_version_text(version).unwrap_or_else(|| version.clone()),
-            theme::WARNING,
-            "A No Version Warning community report says this works with your game version"
+        return Some(CardVersionBadge {
+            label: major_minor_version_text(version).unwrap_or_else(|| version.clone()),
+            color: theme::WARNING,
+            hover: "No Version Warning: a community report says this works with your game version"
                 .to_owned(),
-        ));
+            community_report: true,
+        });
     }
 
-    let newest = highest_supported_version(supported)?;
+    let (newest, community_report) = newest_known_version(supported, community)?;
+    let hover = if community_report {
+        format!(
+            "No Version Warning: reported compatible up to RimWorld {newest} (does not list your game version)"
+        )
+    } else {
+        "Does not list your game version".to_owned()
+    };
 
-    Some((
-        newest.to_owned(),
-        theme::TEXT_FAINT,
-        "Does not list your game version".to_owned(),
-    ))
+    Some(CardVersionBadge {
+        label: newest.to_owned(),
+        color: theme::TEXT_FAINT,
+        hover,
+        community_report,
+    })
 }
 
 fn show_pager(
@@ -1325,7 +1351,10 @@ fn show_pager(
 
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(enabled && page > 1, egui::Button::new("Previous"))
+            .add_enabled_ui(enabled && page > 1, |ui| {
+                theme::secondary_button_sized(ui, "Previous", Vec2::new(0.0, theme::CONTROL_HEIGHT))
+            })
+            .inner
             .clicked()
         {
             *action = Some(WorkshopAction::GoToPage(page - 1));
@@ -1358,7 +1387,10 @@ fn show_pager(
         }
 
         if ui
-            .add_enabled(enabled && page < page_count, egui::Button::new("Next"))
+            .add_enabled_ui(enabled && page < page_count, |ui| {
+                theme::secondary_button_sized(ui, "Next", Vec2::new(0.0, theme::CONTROL_HEIGHT))
+            })
+            .inner
             .clicked()
         {
             *action = Some(WorkshopAction::GoToPage(page + 1));
@@ -1573,8 +1605,6 @@ fn show_detail_window(
             }
 
             ui.horizontal_wrapped(|ui| {
-                theme::hint(ui, format!("Workshop item {}", item.published_file_id));
-
                 if ui.link("Copy ID").clicked() {
                     ui.ctx().copy_text(item.published_file_id.to_string());
                 }
@@ -1859,14 +1889,28 @@ fn show_image_viewer(
             ui,
             |ui| {
                 if ui
-                    .add_enabled(index > 0, egui::Button::new("Previous"))
+                    .add_enabled_ui(index > 0, |ui| {
+                        theme::secondary_button_sized(
+                            ui,
+                            "Previous",
+                            Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                        )
+                    })
+                    .inner
                     .clicked()
                 {
                     action = Some(WorkshopAction::ShowImage(index - 1));
                 }
 
                 if ui
-                    .add_enabled(index + 1 < images.len(), egui::Button::new("Next"))
+                    .add_enabled_ui(index + 1 < images.len(), |ui| {
+                        theme::secondary_button_sized(
+                            ui,
+                            "Next",
+                            Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                        )
+                    })
+                    .inner
                     .clicked()
                 {
                     action = Some(WorkshopAction::ShowImage(index + 1));
@@ -1915,6 +1959,12 @@ mod tests {
             community_supported_versions: Vec::new(),
             loader_after: Vec::new(),
             loader_before: Vec::new(),
+            force_load_after: Vec::new(),
+            force_load_before: Vec::new(),
+            mod_dependencies: Vec::new(),
+            incompatible_with: Vec::new(),
+            inferred_after: Vec::new(),
+            is_patch_only: false,
             folder: PathBuf::new(),
             source: ModSource::SteamWorkshop { workshop_id },
             mod_type: ModType::Xml,
@@ -1960,8 +2010,9 @@ mod tests {
             card_version_badge(&["1.5".to_owned(), "1.6".to_owned()], &[], Some("1.6.4211"))
                 .expect("badge");
 
-        assert_eq!(badge.0, "1.6");
-        assert_eq!(badge.1, theme::SUCCESS);
+        assert_eq!(badge.label, "1.6");
+        assert_eq!(badge.color, theme::SUCCESS);
+        assert!(!badge.community_report);
     }
 
     #[test]
@@ -1969,8 +2020,10 @@ mod tests {
         let badge = card_version_badge(&["1.5".to_owned()], &["1.6".to_owned()], Some("1.6"))
             .expect("badge");
 
-        assert_eq!(badge.0, "1.6");
-        assert_eq!(badge.1, theme::WARNING);
+        assert_eq!(badge.label, "1.6");
+        assert_eq!(badge.color, theme::WARNING);
+        assert!(badge.community_report);
+        assert!(badge.hover.contains("No Version Warning"));
     }
 
     #[test]
@@ -1978,8 +2031,49 @@ mod tests {
         let badge = card_version_badge(&["1.4".to_owned(), "1.5".to_owned()], &[], Some("1.6"))
             .expect("badge");
 
-        assert_eq!(badge.0, "1.5");
-        assert_eq!(badge.1, theme::TEXT_FAINT);
+        assert_eq!(badge.label, "1.5");
+        assert_eq!(badge.color, theme::TEXT_FAINT);
+        assert!(!badge.community_report);
+    }
+
+    #[test]
+    fn card_badge_shows_newer_community_version_with_icon_when_below_game_version() {
+        let badge = card_version_badge(&["1.5".to_owned()], &["1.6".to_owned()], Some("1.7"))
+            .expect("badge");
+
+        assert_eq!(badge.label, "1.6");
+        assert_eq!(badge.color, theme::TEXT_FAINT);
+        assert!(badge.community_report);
+        assert!(badge.hover.contains("No Version Warning"));
+        assert!(badge.hover.contains("1.6"));
+    }
+
+    #[test]
+    fn installed_workshop_item_falls_back_to_remote_community_reports() {
+        let installed = workshop_mod("example.installed", 1234);
+        let mods = ModCollection::new(vec![installed], Vec::new(), Vec::new(), Vec::new());
+        let covered = CoveredMods::from([(1234, vec!["1.6".to_owned()])]);
+        let covered_state = CoveredModsState::Ready(&covered);
+        let pending = HashSet::new();
+        let context = ItemContext {
+            workshop_path: None,
+            steamcmd_workshop_path: None,
+            steamcmd_available: false,
+            api_key_configured: false,
+            mods: &mods,
+            game_version: Some("1.6"),
+            covered_mods: &covered_state,
+            subscribed_ids: None,
+            subscriptions_loading: false,
+            pending_subscriptions: &pending,
+            installing_items: &[],
+        };
+        let item = subscribed_item(1234, "Installed", "", 0, 0, &["1.5"], &[]);
+
+        let (supported, community) = versions_for_item(&item, &context);
+
+        assert_eq!(supported, ["1.5"]);
+        assert_eq!(community, ["1.6"]);
     }
 
     fn subscribed_item(

@@ -1,14 +1,35 @@
-use crate::models::ModId;
+use eframe::egui;
+
+use crate::models::{ModId, PackageId};
 use crate::ui::mod_list::{ModListAction, ModListKind, SelectionMode};
 
 use super::App;
 
 impl App {
+    pub(super) fn focus_mod_by_package_id(&mut self, package_id: &PackageId) -> bool {
+        let Some(mod_id) = self.mods.find_id_by_package_id(package_id) else {
+            return false;
+        };
+
+        let kind = if self.mods.enabled_ids().contains(&mod_id) {
+            ModListKind::Enabled
+        } else {
+            ModListKind::Disabled
+        };
+
+        // A search left over from an earlier filter must not hide the mod the
+        // user just asked to see.
+        self.state.mod_search.clear();
+        self.select_mod_group(vec![mod_id], kind);
+        true
+    }
+
     pub(super) fn clear_mod_selection(&mut self) {
         self.state.selected_mod_id = None;
         self.state.selected_mod_ids.clear();
         self.state.selection_anchor_id = None;
         self.state.selection_kind = None;
+        self.state.organize_target = None;
     }
 
     fn select_mod_group(&mut self, mod_ids: Vec<ModId>, kind: ModListKind) {
@@ -26,7 +47,7 @@ impl App {
         self.state.selection_kind = Some(kind);
     }
 
-    pub(super) fn apply_mod_list_action(&mut self, action: ModListAction) {
+    pub(super) fn apply_mod_list_action(&mut self, action: ModListAction, context: &egui::Context) {
         match action {
             ModListAction::Select { mod_id, kind, mode } => {
                 if self.state.selection_kind != Some(kind) {
@@ -128,6 +149,16 @@ impl App {
 
             ModListAction::Delete { mod_ids } => {
                 self.request_mod_deletion(&mod_ids);
+            }
+
+            ModListAction::Organize { mod_ids } => {
+                self.open_organize(mod_ids);
+            }
+
+            ModListAction::Unsubscribe { published_file_ids } => {
+                for published_file_id in published_file_ids {
+                    self.set_subscription(published_file_id, false, context);
+                }
             }
         }
     }

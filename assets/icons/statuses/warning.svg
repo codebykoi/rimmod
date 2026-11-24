@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Warning</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#735618"/>
+      <stop offset="100%" stop-color="#47340d"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <path fill="#f5c84c" d="M10.2 5.2 H13.8 L13.2 14.2 H10.8 Z"/>
+  <rect x="10.5" y="16.2" width="3" height="2.8" fill="#f5c84c"/>
+</svg>

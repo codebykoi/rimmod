@@ -7,15 +7,22 @@ use crate::ui::mod_list::{ModListAction, ModListKind, SelectionMode};
 
 use super::*;
 
+fn apply_mod_list_action(app: &mut App, action: ModListAction) {
+    app.apply_mod_list_action(action, &egui::Context::default());
+}
+
 #[test]
 fn failed_reorder_is_reported_as_a_persistent_error() {
     let mut app = App::default();
 
-    app.apply_mod_list_action(ModListAction::Reorder {
-        mod_ids: vec![ModId::from_index(0)],
-        kind: ModListKind::Enabled,
-        before_mod_id: None,
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Reorder {
+            mod_ids: vec![ModId::from_index(0)],
+            kind: ModListKind::Enabled,
+            before_mod_id: None,
+        },
+    );
 
     assert!(
         app.action_error
@@ -31,25 +38,34 @@ fn modifier_selection_builds_and_replaces_a_group() {
     let second = ModId::from_index(2);
     let third = ModId::from_index(3);
 
-    app.apply_mod_list_action(ModListAction::Select {
-        mod_id: first,
-        kind: ModListKind::Disabled,
-        mode: SelectionMode::Replace,
-    });
-    app.apply_mod_list_action(ModListAction::Select {
-        mod_id: third,
-        kind: ModListKind::Disabled,
-        mode: SelectionMode::Toggle,
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Select {
+            mod_id: first,
+            kind: ModListKind::Disabled,
+            mode: SelectionMode::Replace,
+        },
+    );
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Select {
+            mod_id: third,
+            kind: ModListKind::Disabled,
+            mode: SelectionMode::Toggle,
+        },
+    );
 
     assert_eq!(app.state.selected_mod_ids, [first, third]);
     assert_eq!(app.state.selected_mod_id, Some(third));
 
-    app.apply_mod_list_action(ModListAction::Select {
-        mod_id: second,
-        kind: ModListKind::Disabled,
-        mode: SelectionMode::Range(vec![first, second]),
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Select {
+            mod_id: second,
+            kind: ModListKind::Disabled,
+            mode: SelectionMode::Range(vec![first, second]),
+        },
+    );
 
     assert_eq!(app.state.selected_mod_ids, [first, second]);
     assert_eq!(app.state.selected_mod_id, Some(second));
@@ -61,16 +77,22 @@ fn selecting_a_mod_in_the_other_list_starts_a_new_group() {
     let disabled_mod = ModId::from_index(1);
     let enabled_mod = ModId::from_index(2);
 
-    app.apply_mod_list_action(ModListAction::Select {
-        mod_id: disabled_mod,
-        kind: ModListKind::Disabled,
-        mode: SelectionMode::Replace,
-    });
-    app.apply_mod_list_action(ModListAction::Select {
-        mod_id: enabled_mod,
-        kind: ModListKind::Enabled,
-        mode: SelectionMode::Toggle,
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Select {
+            mod_id: disabled_mod,
+            kind: ModListKind::Disabled,
+            mode: SelectionMode::Replace,
+        },
+    );
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Select {
+            mod_id: enabled_mod,
+            kind: ModListKind::Enabled,
+            mode: SelectionMode::Toggle,
+        },
+    );
 
     assert_eq!(app.state.selected_mod_ids, [enabled_mod]);
     assert_eq!(app.state.selection_kind, Some(ModListKind::Enabled));
@@ -86,17 +108,23 @@ fn load_order_changes_can_be_undone_and_redone() {
         ..App::default()
     };
 
-    app.apply_mod_list_action(ModListAction::Select {
-        mod_id: first,
-        kind: ModListKind::Disabled,
-        mode: SelectionMode::Range(vec![first, second]),
-    });
-    app.apply_mod_list_action(ModListAction::Transfer {
-        mod_ids: vec![first, second],
-        from: ModListKind::Disabled,
-        to: ModListKind::Enabled,
-        before_mod_id: None,
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Select {
+            mod_id: first,
+            kind: ModListKind::Disabled,
+            mode: SelectionMode::Range(vec![first, second]),
+        },
+    );
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Transfer {
+            mod_ids: vec![first, second],
+            from: ModListKind::Disabled,
+            to: ModListKind::Enabled,
+            before_mod_id: None,
+        },
+    );
 
     assert_eq!(app.mods.disabled_ids(), []);
     assert_eq!(app.mods.enabled_ids(), [active, first, second]);
@@ -131,20 +159,26 @@ fn a_new_change_after_undo_clears_redo_history() {
         ..App::default()
     };
 
-    app.apply_mod_list_action(ModListAction::Reorder {
-        mod_ids: vec![second],
-        kind: ModListKind::Disabled,
-        before_mod_id: Some(first),
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Reorder {
+            mod_ids: vec![second],
+            kind: ModListKind::Disabled,
+            before_mod_id: Some(first),
+        },
+    );
     app.undo_load_order_change();
 
     assert_eq!(app.redo_history.len(), 1);
 
-    app.apply_mod_list_action(ModListAction::Reorder {
-        mod_ids: vec![first],
-        kind: ModListKind::Disabled,
-        before_mod_id: None,
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Reorder {
+            mod_ids: vec![first],
+            kind: ModListKind::Disabled,
+            before_mod_id: None,
+        },
+    );
 
     assert_eq!(app.mods.disabled_ids(), [second, first]);
     assert!(app.redo_history.is_empty());
@@ -158,12 +192,15 @@ fn keyboard_shortcuts_undo_and_redo_a_load_order_change() {
         ..App::default()
     };
 
-    app.apply_mod_list_action(ModListAction::Transfer {
-        mod_ids: vec![disabled_mod],
-        from: ModListKind::Disabled,
-        to: ModListKind::Enabled,
-        before_mod_id: None,
-    });
+    apply_mod_list_action(
+        &mut app,
+        ModListAction::Transfer {
+            mod_ids: vec![disabled_mod],
+            from: ModListKind::Disabled,
+            to: ModListKind::Enabled,
+            before_mod_id: None,
+        },
+    );
 
     let context = egui::Context::default();
     let undo_input = egui::RawInput {

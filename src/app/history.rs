@@ -91,7 +91,10 @@ impl App {
     }
 
     pub(super) fn handle_history_shortcuts(&mut self, context: &egui::Context) {
-        if context.egui_wants_keyboard_input() {
+        if context.egui_wants_keyboard_input()
+            || self.state.settings_open
+            || self.state.shortcuts_open
+        {
             return;
         }
 

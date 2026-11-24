@@ -28,11 +28,15 @@ fn show_path_setting(
             },
             |ui| {
                 // Sides places right-side widgets from right to left.
-                if ui.button("Clear...").clicked() {
+                if theme::secondary_button_sized(ui, "Clear...", egui::Vec2::new(0.0, 24.0))
+                    .clicked()
+                {
                     path.clear();
                 }
 
-                if ui.button("Choose...").clicked() {
+                if theme::secondary_button_sized(ui, "Choose...", egui::Vec2::new(0.0, 24.0))
+                    .clicked()
+                {
                     let mut dialog = rfd::FileDialog::new().set_title(format!("Choose {title}"));
 
                     if !path.trim().is_empty() {
@@ -47,7 +51,10 @@ fn show_path_setting(
                 let can_open = !path.trim().is_empty();
 
                 if ui
-                    .add_enabled(can_open, egui::Button::new("Open..."))
+                    .add_enabled_ui(can_open, |ui| {
+                        theme::secondary_button_sized(ui, "Open...", egui::Vec2::new(0.0, 24.0))
+                    })
+                    .inner
                     .clicked()
                 {
                     requested_open = Some(OpenTarget::Folder(PathBuf::from(path.trim())));
@@ -86,11 +93,15 @@ fn show_file_setting(
                 ui.label(egui::RichText::new(title).text_style(theme::strong_style()));
             },
             |ui| {
-                if ui.button("Clear...").clicked() {
+                if theme::secondary_button_sized(ui, "Clear...", egui::Vec2::new(0.0, 24.0))
+                    .clicked()
+                {
                     path.clear();
                 }
 
-                if ui.button("Choose...").clicked() {
+                if theme::secondary_button_sized(ui, "Choose...", egui::Vec2::new(0.0, 24.0))
+                    .clicked()
+                {
                     let mut dialog = rfd::FileDialog::new().set_title(format!("Choose {title}"));
 
                     if !path.trim().is_empty() {
@@ -105,7 +116,14 @@ fn show_file_setting(
                 let parent = PathBuf::from(path.trim()).parent().map(PathBuf::from);
 
                 if ui
-                    .add_enabled(parent.is_some(), egui::Button::new("Open folder..."))
+                    .add_enabled_ui(parent.is_some(), |ui| {
+                        theme::secondary_button_sized(
+                            ui,
+                            "Open folder...",
+                            egui::Vec2::new(0.0, 24.0),
+                        )
+                    })
+                    .inner
                     .clicked()
                     && let Some(parent) = parent
                 {
@@ -218,7 +236,7 @@ pub(crate) fn display_settings(ui: &mut egui::Ui, state: &mut UiState) -> Option
 
             ui.add_space(10.0);
 
-            egui::containers::Sides::new().height(28.0).show(
+            egui::containers::Sides::new().height(theme::CONTROL_HEIGHT).show(
                 ui,
                 |_| {},
                 |ui| {

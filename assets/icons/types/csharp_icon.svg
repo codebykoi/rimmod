@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>C# mod</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#483a70"/>
+      <stop offset="100%" stop-color="#2e254a"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <path fill="#dfd3ff" d="M5.7 6.5 H10.2 V8.5 H6.5 L5.9 9.1 V14.9 L6.5 15.5 H10.2 V17.5 H5.7 L3.9 15.7 V8.3 Z"/>
+  <path fill="#dfd3ff" d="M14.1 7 H15.6 L14.6 17 H13.1 Z M17.5 7 H19 L18 17 H16.5 Z M12.3 9.5 H19.9 V11 H12.3 Z M11.9 13 H19.5 V14.5 H11.9 Z"/>
+</svg>

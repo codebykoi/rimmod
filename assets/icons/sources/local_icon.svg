@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Local mod</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#265c58"/>
+      <stop offset="100%" stop-color="#173b39"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <path fill="#c9f2ed" d="M4.5 6.5 H10.1 L11.7 8.3 H19.5 V10 H4.5 Z"/>
+  <rect x="4.5" y="11.2" width="15" height="6.3" fill="#c9f2ed"/>
+</svg>

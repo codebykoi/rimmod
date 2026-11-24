@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>XML mod</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#364354"/>
+      <stop offset="100%" stop-color="#242e3b"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <path fill="#c2ccd7" d="M8.1 7.8 L3.9 12 L8.1 16.2 L9.4 14.9 L6.5 12 L9.4 9.1 Z"/>
+  <path fill="#c2ccd7" d="M15.9 7.8 L20.1 12 L15.9 16.2 L14.6 14.9 L17.5 12 L14.6 9.1 Z"/>
+  <path fill="#c2ccd7" d="M12.9 6.5 H14.6 L11.1 17.5 H9.4 Z"/>
+</svg>

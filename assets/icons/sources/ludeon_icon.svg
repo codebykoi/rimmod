@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Official RimWorld content</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8f5e28"/>
+      <stop offset="100%" stop-color="#5a3916"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <circle cx="12" cy="9.4" r="4.1" fill="#ffecd4"/>
+  <path fill="#ffecd4" d="M10.45 13 C10.65 15.4 10.25 17.5 9.1 19.3 H7.7 C5.8 19.3 4.6 20.8 4.4 23 H19.6 C19.4 20.8 18.2 19.3 16.3 19.3 H14.9 C13.75 17.5 13.35 15.4 13.55 13 Z"/>
+</svg>

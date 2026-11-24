@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Git mod</title>
+  <defs>
+    <linearGradient id="plate" gradientUnits="userSpaceOnUse" x1="0" y1="1" x2="0" y2="23">
+      <stop offset="0%" stop-color="#7c3e26"/>
+      <stop offset="100%" stop-color="#4d2415"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <path fill="none" stroke="#ffd8c7" stroke-width="2" stroke-linecap="butt" stroke-linejoin="miter" d="M8.2 7.2 V16.8 M8.2 16.8 L15.8 10.4"/>
+  <circle cx="8.2" cy="7.2" r="2.5" fill="#ffd8c7"/>
+  <circle cx="8.2" cy="16.8" r="2.5" fill="#ffd8c7"/>
+  <circle cx="15.8" cy="10.4" r="2.5" fill="#ffd8c7"/>
+  <circle cx="8.2" cy="7.2" r="1.05" fill="url(#plate)"/>
+  <circle cx="8.2" cy="16.8" r="1.05" fill="url(#plate)"/>
+  <circle cx="15.8" cy="10.4" r="1.05" fill="url(#plate)"/>
+</svg>

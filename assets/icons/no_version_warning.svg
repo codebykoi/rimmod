@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>No Version Warning community report</title>
+  <defs>
+    <linearGradient id="plate" gradientUnits="userSpaceOnUse" x1="0" y1="1" x2="0" y2="23">
+      <stop offset="0%" stop-color="#285e3c"/>
+      <stop offset="100%" stop-color="#183d26"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" fill="url(#plate)"/>
+  <path fill="#b8f2ca" d="M4.2 6.2 H13.4 L17.7 10.5 L13.4 14.8 H4.2 Z"/>
+  <rect x="11.7" y="9.5" width="2" height="2" fill="url(#plate)"/>
+  <rect x="13.2" y="12.4" width="7.8" height="7.8" fill="url(#plate)"/>
+  <path fill="#6be38d" d="M16.1 13.3 H18.1 V15.3 H20.1 V17.3 H18.1 V19.3 H16.1 V17.3 H14.1 V15.3 H16.1 Z"/>
+</svg>

@@ -7,6 +7,7 @@ use crate::models::{ModId, ModSource, PackageId};
 use crate::services::mod_deletion;
 use crate::services::mod_loader;
 use crate::services::workshop;
+use crate::ui::theme;
 
 use super::{App, LoadOrderStatus};
 
@@ -187,17 +188,13 @@ impl App {
                 }
 
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        action = Some(DialogAction::Cancel);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::danger_button(ui, "Delete permanently").clicked() {
+                        action = Some(DialogAction::Delete);
                     }
 
-                    let delete_button = egui::Button::new(
-                        egui::RichText::new("Delete permanently")
-                            .color(ui.visuals().error_fg_color),
-                    );
-                    if ui.add(delete_button).clicked() {
-                        action = Some(DialogAction::Delete);
+                    if theme::secondary_button(ui, "Cancel").clicked() {
+                        action = Some(DialogAction::Cancel);
                     }
                 });
             });
