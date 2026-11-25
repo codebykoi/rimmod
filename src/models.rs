@@ -38,7 +38,7 @@ impl fmt::Display for PackageId {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub(crate) enum ModType {
     /// Contains CSharp code
     CSharp,
@@ -52,7 +52,7 @@ pub(crate) enum ModType {
 }
 
 /// Mod sources, ordered by priority
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub(crate) enum ModSource {
     /// Official game content
     Official,
@@ -118,6 +118,7 @@ pub(crate) struct InferredDependency {
     pub(crate) source_file: PathBuf,
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct RimworldMod {
     pub(crate) name: String,
     pub(crate) package_id: PackageId,

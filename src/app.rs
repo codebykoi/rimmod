@@ -1,7 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use eframe::egui;
 use egui_notify::Toasts;
@@ -10,7 +9,6 @@ use nucleo_matcher::Matcher;
 use crate::models::{ModCollection, ModId};
 use crate::services::mod_loader::{self, ModLoadWarning};
 use crate::services::mod_sorter::sort_mods;
-use crate::services::mod_watcher::ModWatcher;
 use crate::services::organization::{self, Organization};
 use crate::services::settings::{Settings, SettingsErrors};
 use crate::services::updater::StartupNotice;
@@ -45,6 +43,7 @@ use self::log_ctrl::LogState;
 use self::modpacks_ctrl::{ModpackState, open_exported_pack_folder_action};
 use self::settings_apply::{path_from_input, path_to_input, persist_settings};
 use self::update_ctrl::{UpdateState, open_update_release_action};
+use self::watcher::ModWatcherState;
 use self::workshop_ctrl::{CoveredModsStatus, SubscriptionStatus, WorkshopState};
 
 const SETTINGS_STORAGE_KEY: &str = "rimmod_settings";
@@ -129,8 +128,7 @@ pub(crate) struct App {
     action_error: Option<String>,
     game_version: Option<String>,
     load_order_status: LoadOrderStatus,
-    mod_watcher: Option<ModWatcher>,
-    pending_mod_reload_at: Option<Instant>,
+    mod_watcher: ModWatcherState,
     pending_mod_deletion: Option<PendingModDeletion>,
     undo_history: VecDeque<LoadOrderSnapshot>,
     redo_history: VecDeque<LoadOrderSnapshot>,
@@ -280,6 +278,7 @@ impl App {
     }
 
     fn reload_mods(&mut self) {
+        self.cancel_pending_watcher_reload();
         self.clear_load_order_history();
         self.logs.invalidate();
 

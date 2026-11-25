@@ -125,6 +125,8 @@ impl App {
     }
 
     fn reload_after_mod_deletion(&mut self, active_package_ids: Vec<PackageId>) -> io::Result<()> {
+        self.cancel_pending_watcher_reload();
+
         let mut report = match mod_loader::load_mods(&self.settings, self.game_version.as_deref()) {
             Ok(report) => report,
             Err(error) => {

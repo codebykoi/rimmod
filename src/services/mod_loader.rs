@@ -30,7 +30,7 @@ enum ModLoadWarningKind {
     CompatibilityData,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ModLoadWarning {
     kind: ModLoadWarningKind,
     path: Option<PathBuf>,
