@@ -8,9 +8,11 @@ use crate::models::{
     versions_are_compatible,
 };
 use crate::services::no_version_warning::CoveredMods;
+mod description;
+
 use crate::services::workshop::{
     RIMWORLD_DLC, RIMWORLD_VERSIONS, SubscribedSort, WorkshopItem, WorkshopSort, format_count,
-    format_date, is_item_installed, strip_bbcode,
+    format_date, is_item_installed,
 };
 use crate::ui::OpenTarget;
 use crate::ui::icons::{INLINE_ICON_SCALE, no_version_warning_icon};
@@ -27,6 +29,9 @@ const CARD_AUTHOR_HEIGHT: f32 = 16.0;
 const CARD_META_HEIGHT: f32 = 18.0;
 const CARD_VERSION_HEIGHT: f32 = 20.0;
 const CARD_ACTION_HEIGHT: f32 = 26.0;
+const SLIDESHOW_PRELOAD_DELAY: f64 = 0.35;
+const SLIDESHOW_START_DELAY: f64 = 0.7;
+const SLIDESHOW_SLIDE_INTERVAL: f64 = 1.5;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) enum WorkshopLoadStatus {
@@ -93,7 +98,15 @@ pub(crate) struct WorkshopView<'a> {
     pub(crate) grid_generation: u64,
     pub(crate) subscribed_generation: u64,
     pub(crate) detail: Option<&'a WorkshopItem>,
-    pub(crate) detail_image: Option<usize>,
+    pub(crate) detail_image: Option<&'a WorkshopImageViewer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkshopImageViewer {
+    /// Preview screenshot in `WorkshopItem::images` with prev/next navigation.
+    Gallery(usize),
+    /// Standalone image opened from the Workshop item description.
+    Single(String),
 }
 
 pub(crate) enum WorkshopAction {
@@ -109,7 +122,7 @@ pub(crate) enum WorkshopAction {
     RetryCoveredMods,
     OpenDetail(Box<WorkshopItem>),
     CloseDetail,
-    ShowImage(usize),
+    ShowImage(WorkshopImageViewer),
     CloseImage,
     Copy { text: String, label: &'static str },
 }
@@ -1194,10 +1207,7 @@ fn show_card(
 ) -> Option<WorkshopAction> {
     let mut action = None;
     let installed = context.is_installed(item.published_file_id);
-    let preview = item
-        .preview_url
-        .as_deref()
-        .or_else(|| item.images.first().map(String::as_str));
+    let preview_urls = item.preview_slideshow_urls();
 
     let inner_width = (width - 16.0).max(120.0);
     let image_height = (inner_width * CARD_IMAGE_ASPECT).round();
@@ -1222,46 +1232,20 @@ fn show_card(
                 ui.set_width(inner_width);
                 ui.set_min_height(content_height);
 
-                let image_area = ui.allocate_ui_with_layout(
+                let mut image_response = show_preview_slideshow(
+                    ui,
+                    ui.id().with(("preview", item.published_file_id)),
                     Vec2::new(inner_width, image_height),
-                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                    |ui| {
-                        ui.set_min_size(Vec2::new(inner_width, image_height));
-                        ui.painter().rect_filled(
-                            ui.max_rect(),
-                            CornerRadius::ZERO,
-                            theme::SURFACE_HOVER,
-                        );
+                    &preview_urls,
+                    &item.title,
+                    "No preview",
+                    Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
 
-                        if let Some(preview) = preview {
-                            ui.add(
-                                egui::Image::new(preview)
-                                    .max_width(inner_width)
-                                    .max_height(image_height)
-                                    .maintain_aspect_ratio(true)
-                                    .show_loading_spinner(true)
-                                    .alt_text(format!("Preview image for {}", item.title)),
-                            );
-                        } else {
-                            ui.painter().text(
-                                ui.max_rect().center(),
-                                egui::Align2::CENTER_CENTER,
-                                "No preview",
-                                theme::medium_font(11.0),
-                                theme::TEXT_FAINT,
-                            );
-                        }
-                    },
-                );
-
-                let image_response = ui
-                    .interact(
-                        image_area.response.rect,
-                        ui.id().with(("preview", item.published_file_id)),
-                        Sense::click(),
-                    )
-                    .on_hover_text("Open details")
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if preview_urls.len() <= 1 {
+                    image_response = image_response.on_hover_text("Open details");
+                }
 
                 if image_response.clicked() {
                     action = Some(WorkshopAction::OpenDetail(Box::new(item.clone())));
@@ -1774,7 +1758,7 @@ fn show_detail_window(
     ui: &mut egui::Ui,
     item: &WorkshopItem,
     context: &ItemContext<'_>,
-    detail_image: Option<usize>,
+    detail_image: Option<&WorkshopImageViewer>,
 ) -> Option<WorkshopAction> {
     if detail_image.is_none() && ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
         return Some(WorkshopAction::CloseDetail);
@@ -1789,10 +1773,7 @@ fn show_detail_window(
     let preview_height = (screen.height() * 0.3).clamp(150.0, 320.0);
     let gallery_height = (screen.height() * 0.2).clamp(90.0, 200.0);
     let detail_scroll_height = (screen.height() - 80.0).max(200.0);
-    let preview = item
-        .preview_url
-        .as_deref()
-        .or_else(|| item.images.first().map(String::as_str));
+    let preview_urls = item.preview_slideshow_urls();
 
     egui::Window::new("Workshop item")
         .id(egui::Id::new("workshop_detail"))
@@ -1825,35 +1806,14 @@ fn show_detail_window(
                 .show(ui, |ui| {
                     let available_width = ui.available_width();
 
-            ui.allocate_ui_with_layout(
+            show_preview_slideshow(
+                ui,
+                ui.id().with(("detail_preview", item.published_file_id)),
                 Vec2::new(available_width, preview_height),
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| {
-                    ui.set_min_size(Vec2::new(available_width, preview_height));
-                    ui.painter().rect_filled(
-                        ui.max_rect(),
-                        CornerRadius::ZERO,
-                        theme::SURFACE_HOVER,
-                    );
-
-                    if let Some(preview) = preview {
-                        ui.add(
-                            egui::Image::new(preview)
-                                .max_width(available_width)
-                                .max_height(preview_height)
-                                .maintain_aspect_ratio(true)
-                                .show_loading_spinner(true),
-                        );
-                    } else {
-                        ui.painter().text(
-                            ui.max_rect().center(),
-                            egui::Align2::CENTER_CENTER,
-                            "No preview image",
-                            theme::medium_font(11.0),
-                            theme::TEXT_FAINT,
-                        );
-                    }
-                },
+                &preview_urls,
+                &item.title,
+                "No preview image",
+                Sense::hover(),
             );
 
             ui.add_space(8.0);
@@ -2041,40 +2001,29 @@ fn show_detail_window(
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
 
                                 if image_area.clicked() {
-                                    action = Some(WorkshopAction::ShowImage(index));
+                                    action = Some(WorkshopAction::ShowImage(
+                                        WorkshopImageViewer::Gallery(index),
+                                    ));
                                 }
                             }
                         });
                     });
             }
 
+            ui.add_space(6.0);
             ui.separator();
+            ui.add_space(4.0);
+            ui.label(RichText::new("Description").text_style(theme::strong_style()));
+            ui.add_space(4.0);
 
-            let description = strip_bbcode(&item.description);
-            egui::Frame::new()
-                .fill(theme::CANVAS)
-                .corner_radius(CornerRadius::ZERO)
-                .inner_margin(Margin::same(10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-
-                    if description.is_empty() {
-                        theme::hint(ui, "This item has no description.");
-                    } else {
-                        ui.add(
-                            egui::Label::new(RichText::new(description).color(theme::TEXT_MUTED))
-                                .wrap()
-                                .selectable(true),
-                        );
-                    }
-                });
+            description::show_description(ui, item, &mut action);
 
                 });
                 });
         });
 
-    if let Some(image_index) = detail_image
-        && let Some(viewer_action) = show_image_viewer(ui, item, image_index)
+    if let Some(viewer) = detail_image
+        && let Some(viewer_action) = show_image_viewer(ui, item, viewer)
     {
         action = Some(viewer_action);
     }
@@ -2086,35 +2035,46 @@ fn show_detail_window(
     action
 }
 
-/// In-app lightbox for Workshop screenshots. Images never leave the app, so
-/// clicking a thumbnail does not hijack the user's browser.
+/// In-app lightbox for Workshop screenshots and description images. Images
+/// never leave the app, so clicking an image does not hijack the user's browser.
 fn show_image_viewer(
     ui: &mut egui::Ui,
     item: &WorkshopItem,
-    index: usize,
+    viewer: &WorkshopImageViewer,
 ) -> Option<WorkshopAction> {
-    let images = &item.images;
-    let Some(url) = images.get(index) else {
-        return Some(WorkshopAction::CloseImage);
+    let (url, gallery_state) = match viewer {
+        WorkshopImageViewer::Gallery(index) => {
+            let Some(url) = item.images.get(*index) else {
+                return Some(WorkshopAction::CloseImage);
+            };
+            (url.as_str(), Some((*index, item.images.len())))
+        }
+        WorkshopImageViewer::Single(url) => (url.as_str(), None),
     };
 
-    let has_prev = index > 0;
-    let has_next = index + 1 < images.len();
+    let has_prev = gallery_state.is_some_and(|(index, _)| index > 0);
+    let has_next = gallery_state.is_some_and(|(index, len)| index + 1 < len);
 
-    if has_prev
-        && ui
-            .ctx()
-            .input(|input| input.key_pressed(egui::Key::ArrowLeft))
-    {
-        return Some(WorkshopAction::ShowImage(index - 1));
-    }
+    if let Some((index, _)) = gallery_state {
+        if has_prev
+            && ui
+                .ctx()
+                .input(|input| input.key_pressed(egui::Key::ArrowLeft))
+        {
+            return Some(WorkshopAction::ShowImage(WorkshopImageViewer::Gallery(
+                index - 1,
+            )));
+        }
 
-    if has_next
-        && ui
-            .ctx()
-            .input(|input| input.key_pressed(egui::Key::ArrowRight))
-    {
-        return Some(WorkshopAction::ShowImage(index + 1));
+        if has_next
+            && ui
+                .ctx()
+                .input(|input| input.key_pressed(egui::Key::ArrowRight))
+        {
+            return Some(WorkshopAction::ShowImage(WorkshopImageViewer::Gallery(
+                index + 1,
+            )));
+        }
     }
 
     let screen = ui.ctx().content_rect();
@@ -2143,7 +2103,10 @@ fn show_image_viewer(
             let (header_rect, _) =
                 ui.allocate_exact_size(Vec2::new(image_size.x, header_height), Sense::hover());
 
-            let title = format!("{} ({} of {})", item.title, index + 1, images.len());
+            let title = match gallery_state {
+                Some((index, total)) => format!("{} ({} of {})", item.title, index + 1, total),
+                None => item.title.clone(),
+            };
             let title_rect = Rect::from_min_max(
                 header_rect.min + Vec2::new(28.0, 0.0),
                 header_rect.max - Vec2::new(28.0, 0.0),
@@ -2219,7 +2182,7 @@ fn show_image_viewer(
                     ui.painter()
                         .rect_filled(ui.max_rect(), CornerRadius::ZERO, theme::CANVAS);
                     ui.add(
-                        egui::Image::new(url.as_str())
+                        egui::Image::new(url)
                             .max_width(image_size.x)
                             .max_height(image_size.y)
                             .maintain_aspect_ratio(true)
@@ -2232,77 +2195,89 @@ fn show_image_viewer(
             let image_rect = image_area.response.rect;
             let side_width = (image_rect.width() * 0.18).clamp(56.0, 132.0);
 
-            if has_prev {
-                let left_rect = Rect::from_min_max(
-                    image_rect.left_top(),
-                    egui::pos2(image_rect.left() + side_width, image_rect.bottom()),
-                );
-                if image_side_nav_button(ui, left_rect, true).clicked() {
-                    action = Some(WorkshopAction::ShowImage(index - 1));
+            if let Some((index, _)) = gallery_state {
+                if has_prev {
+                    let left_rect = Rect::from_min_max(
+                        image_rect.left_top(),
+                        egui::pos2(image_rect.left() + side_width, image_rect.bottom()),
+                    );
+                    if image_side_nav_button(ui, left_rect, true).clicked() {
+                        action = Some(WorkshopAction::ShowImage(WorkshopImageViewer::Gallery(
+                            index - 1,
+                        )));
+                    }
                 }
-            }
 
-            if has_next {
-                let right_rect = Rect::from_min_max(
-                    egui::pos2(image_rect.right() - side_width, image_rect.top()),
-                    image_rect.right_bottom(),
-                );
-                if image_side_nav_button(ui, right_rect, false).clicked() {
-                    action = Some(WorkshopAction::ShowImage(index + 1));
+                if has_next {
+                    let right_rect = Rect::from_min_max(
+                        egui::pos2(image_rect.right() - side_width, image_rect.top()),
+                        image_rect.right_bottom(),
+                    );
+                    if image_side_nav_button(ui, right_rect, false).clicked() {
+                        action = Some(WorkshopAction::ShowImage(WorkshopImageViewer::Gallery(
+                            index + 1,
+                        )));
+                    }
                 }
             }
 
             ui.add_space(8.0);
 
-            // Footer bar: Previous & Next centered, Close on the right.
+            // Footer bar: Previous & Next centered (for galleries), Close on the right.
             let (footer_rect, _) = ui.allocate_exact_size(
                 Vec2::new(image_size.x, theme::CONTROL_HEIGHT),
                 Sense::hover(),
             );
 
-            let spacing = ui.spacing().item_spacing.x;
-            let nav_width = secondary_button_width(ui, "Previous")
-                + spacing
-                + secondary_button_width(ui, "Next");
-            let nav_rect = Rect::from_center_size(
-                footer_rect.center(),
-                Vec2::new(nav_width, theme::CONTROL_HEIGHT),
-            );
+            if let Some((index, _)) = gallery_state {
+                let spacing = ui.spacing().item_spacing.x;
+                let nav_width = secondary_button_width(ui, "Previous")
+                    + spacing
+                    + secondary_button_width(ui, "Next");
+                let nav_rect = Rect::from_center_size(
+                    footer_rect.center(),
+                    Vec2::new(nav_width, theme::CONTROL_HEIGHT),
+                );
 
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(nav_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    if ui
-                        .add_enabled_ui(has_prev, |ui| {
-                            theme::secondary_button_sized(
-                                ui,
-                                "Previous",
-                                Vec2::new(0.0, theme::CONTROL_HEIGHT),
-                            )
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        action = Some(WorkshopAction::ShowImage(index - 1));
-                    }
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(nav_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        if ui
+                            .add_enabled_ui(has_prev, |ui| {
+                                theme::secondary_button_sized(
+                                    ui,
+                                    "Previous",
+                                    Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                                )
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            action = Some(WorkshopAction::ShowImage(WorkshopImageViewer::Gallery(
+                                index - 1,
+                            )));
+                        }
 
-                    if ui
-                        .add_enabled_ui(has_next, |ui| {
-                            theme::secondary_button_sized(
-                                ui,
-                                "Next",
-                                Vec2::new(0.0, theme::CONTROL_HEIGHT),
-                            )
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        action = Some(WorkshopAction::ShowImage(index + 1));
-                    }
-                },
-            );
+                        if ui
+                            .add_enabled_ui(has_next, |ui| {
+                                theme::secondary_button_sized(
+                                    ui,
+                                    "Next",
+                                    Vec2::new(0.0, theme::CONTROL_HEIGHT),
+                                )
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            action = Some(WorkshopAction::ShowImage(WorkshopImageViewer::Gallery(
+                                index + 1,
+                            )));
+                        }
+                    },
+                );
+            }
 
             let close_width = secondary_button_width(ui, "Close").max(88.0);
             let close_rect = Rect::from_min_max(
@@ -2392,6 +2367,224 @@ fn image_side_nav_button(ui: &mut egui::Ui, rect: Rect, is_previous: bool) -> eg
         .add(egui::Shape::line(points, Stroke::new(2.0, chevron_color)));
 
     response
+}
+
+#[derive(Clone, Copy, Default)]
+struct HoverSlideshowState {
+    started_at: f64,
+    expected_wake_at: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SlideshowFrame {
+    current_index: usize,
+    preload_index: Option<usize>,
+    active: bool,
+    next_update_in: f64,
+}
+
+fn slideshow_frame(elapsed: f64, image_count: usize) -> SlideshowFrame {
+    if image_count <= 1 {
+        return SlideshowFrame {
+            current_index: 0,
+            preload_index: None,
+            active: false,
+            next_update_in: 0.0,
+        };
+    }
+
+    let elapsed = elapsed.max(0.0);
+
+    if elapsed < SLIDESHOW_START_DELAY {
+        let preload_index = (elapsed >= SLIDESHOW_PRELOAD_DELAY).then_some(1);
+        let next_update_in = if elapsed < SLIDESHOW_PRELOAD_DELAY {
+            SLIDESHOW_PRELOAD_DELAY - elapsed
+        } else {
+            SLIDESHOW_START_DELAY - elapsed
+        };
+
+        return SlideshowFrame {
+            current_index: 0,
+            preload_index,
+            active: false,
+            next_update_in,
+        };
+    }
+
+    let since_start = elapsed - SLIDESHOW_START_DELAY;
+    let step = (since_start / SLIDESHOW_SLIDE_INTERVAL).floor() as usize;
+    let current_index = (1 + step) % image_count;
+    let preload_index = Some((current_index + 1) % image_count);
+    let next_step_at = (step as f64 + 1.0) * SLIDESHOW_SLIDE_INTERVAL;
+    let next_update_in = (next_step_at - since_start).max(0.01);
+
+    SlideshowFrame {
+        current_index,
+        preload_index,
+        active: true,
+        next_update_in,
+    }
+}
+
+fn show_preview_slideshow(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    size: Vec2,
+    urls: &[&str],
+    title: &str,
+    empty_label: &str,
+    sense: Sense,
+) -> egui::Response {
+    let (_, rect) = ui.allocate_space(size);
+    let response = ui.interact(rect, id, sense);
+
+    let (now, pointer_present) = ui
+        .ctx()
+        .input(|input| (input.time, input.pointer.hover_pos().is_some()));
+    let mut slide = SlideshowFrame {
+        current_index: 0,
+        preload_index: None,
+        active: false,
+        next_update_in: 0.0,
+    };
+
+    if urls.len() > 1 {
+        if pointer_present && response.hovered() {
+            let started_at = ui
+                .ctx()
+                .data(|data| data.get_temp::<HoverSlideshowState>(id))
+                .filter(|state| now >= state.started_at && now <= state.expected_wake_at + 1.0)
+                .map_or(now, |state| state.started_at);
+
+            slide = slideshow_frame(now - started_at, urls.len());
+            let wake_in = slide.next_update_in.max(0.01);
+
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    id,
+                    HoverSlideshowState {
+                        started_at,
+                        expected_wake_at: now + wake_in,
+                    },
+                );
+            });
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(wake_in));
+
+            if let Some(preload_index) = slide.preload_index
+                && let Some(preload_url) = urls.get(preload_index)
+            {
+                let _ = egui::Image::new(*preload_url).load_for_size(ui.ctx(), size);
+            }
+        } else {
+            ui.ctx().data_mut(|data| {
+                data.remove_temp::<HoverSlideshowState>(id);
+            });
+        }
+    }
+
+    let current_url = urls.get(slide.current_index).copied();
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::TopDown,
+            )),
+        |ui| {
+            ui.set_min_size(size);
+            ui.painter()
+                .rect_filled(rect, CornerRadius::ZERO, theme::SURFACE_HOVER);
+
+            if let Some(preview_url) = current_url {
+                ui.add(
+                    egui::Image::new(preview_url)
+                        .max_width(size.x)
+                        .max_height(size.y)
+                        .maintain_aspect_ratio(true)
+                        .show_loading_spinner(true)
+                        .sense(Sense::empty())
+                        .alt_text(format!("Preview image for {title}")),
+                );
+            } else {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    empty_label,
+                    theme::medium_font(11.0),
+                    theme::TEXT_FAINT,
+                );
+            }
+        },
+    );
+
+    if slide.active && urls.len() > 1 {
+        paint_slideshow_indicator(ui, rect, slide.current_index, urls.len());
+    }
+
+    response
+}
+
+fn paint_slideshow_indicator(ui: &egui::Ui, rect: Rect, current: usize, total: usize) {
+    if total <= 1 || rect.width() < 24.0 || rect.height() < 24.0 {
+        return;
+    }
+
+    let strip_height = 11.0;
+    let strip_rect = Rect::from_min_max(
+        egui::pos2(rect.left(), rect.bottom() - strip_height),
+        rect.right_bottom(),
+    );
+    ui.painter().rect_filled(
+        strip_rect,
+        CornerRadius::ZERO,
+        Color32::from_black_alpha(150),
+    );
+
+    let padding_x = 6.0;
+    let bar_height = 3.0;
+    let bar_top = rect.bottom() - 7.0;
+    let track_left = rect.left() + padding_x;
+    let track_width = (rect.width() - padding_x * 2.0).max(8.0);
+
+    if total <= 12 {
+        let gap = 3.0;
+        let segment_width =
+            ((track_width - gap * (total.saturating_sub(1) as f32)) / total as f32).max(2.0);
+
+        for index in 0..total {
+            let x = track_left + index as f32 * (segment_width + gap);
+            let segment_rect =
+                Rect::from_min_size(egui::pos2(x, bar_top), Vec2::new(segment_width, bar_height));
+            let color = if index == current {
+                Color32::WHITE
+            } else {
+                Color32::from_white_alpha(95)
+            };
+            ui.painter()
+                .rect_filled(segment_rect, CornerRadius::ZERO, color);
+        }
+    } else {
+        let track_rect = Rect::from_min_size(
+            egui::pos2(track_left, bar_top),
+            Vec2::new(track_width, bar_height),
+        );
+        ui.painter().rect_filled(
+            track_rect,
+            CornerRadius::ZERO,
+            Color32::from_white_alpha(80),
+        );
+
+        let segment_width = (track_width / total as f32).max(8.0).min(track_width);
+        let travel = (track_width - segment_width).max(0.0);
+        let progress = current as f32 / (total - 1) as f32;
+        let active_rect = Rect::from_min_size(
+            egui::pos2(track_left + travel * progress, bar_top),
+            Vec2::new(segment_width, bar_height),
+        );
+        ui.painter()
+            .rect_filled(active_rect, CornerRadius::ZERO, Color32::WHITE);
+    }
 }
 
 fn installed_workshop_mod(mods: &ModCollection, published_file_id: u64) -> Option<&RimworldMod> {
@@ -2683,5 +2876,141 @@ mod tests {
             None,
         );
         assert_eq!(popular[0].published_file_id, 1);
+    }
+
+    #[test]
+    fn slideshow_frame_waits_before_advancing_and_cycles_all_images() {
+        let single = slideshow_frame(5.0, 1);
+        assert_eq!(single.current_index, 0);
+        assert!(!single.active);
+        assert_eq!(single.preload_index, None);
+
+        let initial = slideshow_frame(0.1, 3);
+        assert_eq!(initial.current_index, 0);
+        assert!(!initial.active);
+        assert_eq!(initial.preload_index, None);
+
+        let warming = slideshow_frame(SLIDESHOW_PRELOAD_DELAY + 0.05, 3);
+        assert_eq!(warming.current_index, 0);
+        assert!(!warming.active);
+        assert_eq!(warming.preload_index, Some(1));
+
+        let first_slide = slideshow_frame(SLIDESHOW_START_DELAY + 0.05, 3);
+        assert_eq!(first_slide.current_index, 1);
+        assert!(first_slide.active);
+        assert_eq!(first_slide.preload_index, Some(2));
+
+        let second_slide =
+            slideshow_frame(SLIDESHOW_START_DELAY + SLIDESHOW_SLIDE_INTERVAL + 0.05, 3);
+        assert_eq!(second_slide.current_index, 2);
+        assert!(second_slide.active);
+        assert_eq!(second_slide.preload_index, Some(0));
+
+        let wrapped = slideshow_frame(
+            SLIDESHOW_START_DELAY + SLIDESHOW_SLIDE_INTERVAL * 2.0 + 0.05,
+            3,
+        );
+        assert_eq!(wrapped.current_index, 0);
+        assert!(wrapped.active);
+        assert_eq!(wrapped.preload_index, Some(1));
+    }
+
+    #[test]
+    fn hover_slideshow_tracks_hover_duration_and_resets_when_pointer_leaves() {
+        let context = egui::Context::default();
+        let preview_id = egui::Id::new("test_preview_slideshow");
+        let urls = [
+            "https://example.com/cover.png",
+            "https://example.com/shot1.png",
+            "https://example.com/shot2.png",
+        ];
+
+        let run_frame = |time: f64, pointer_pos: Option<egui::Pos2>| {
+            let mut raw_input = egui::RawInput {
+                time: Some(time),
+                ..Default::default()
+            };
+            if let Some(pos) = pointer_pos {
+                raw_input.events.push(egui::Event::PointerMoved(pos));
+            } else {
+                raw_input.events.push(egui::Event::PointerGone);
+            }
+
+            let mut preview_rect = Rect::NOTHING;
+            let mut output = context.run_ui(raw_input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let response = show_preview_slideshow(
+                        ui,
+                        preview_id,
+                        Vec2::new(200.0, 112.0),
+                        &urls,
+                        "Example mod",
+                        "No preview",
+                        Sense::click(),
+                    );
+                    preview_rect = response.rect;
+                });
+            });
+            let repaint_delay = output.viewport_output[&egui::ViewportId::ROOT]
+                .repaint_delay
+                .as_secs_f64();
+            output.textures_delta.clear();
+
+            (preview_rect, repaint_delay)
+        };
+
+        // Initial layout pass to discover the preview rect.
+        let (rect, _) = run_frame(0.0, None);
+        assert!(
+            context
+                .data(|data| data.get_temp::<HoverSlideshowState>(preview_id))
+                .is_none()
+        );
+
+        // Hover over the preview rect: starts tracking and schedules a repaint.
+        let (_, repaint_delay) = run_frame(1.0, Some(rect.center()));
+        let state = context
+            .data(|data| data.get_temp::<HoverSlideshowState>(preview_id))
+            .expect("hover state recorded");
+        assert_eq!(state.started_at, 1.0);
+        assert!(repaint_delay < 1.0);
+
+        // Continue hovering past the start delay: started_at stays anchored at 1.0
+        // and the next scheduled wake advances to the following slide interval.
+        let _ = run_frame(1.8, Some(rect.center()));
+        let state = context
+            .data(|data| data.get_temp::<HoverSlideshowState>(preview_id))
+            .expect("hover state preserved");
+        assert_eq!(state.started_at, 1.0);
+        assert!(
+            (state.expected_wake_at - (1.0 + SLIDESHOW_START_DELAY + SLIDESHOW_SLIDE_INTERVAL))
+                .abs()
+                < 1e-6
+        );
+
+        // Pointer leaves the preview rect: hover slideshow state resets immediately.
+        let _ = run_frame(
+            2.0,
+            Some(egui::pos2(rect.right() + 50.0, rect.bottom() + 50.0)),
+        );
+        assert!(
+            context
+                .data(|data| data.get_temp::<HoverSlideshowState>(preview_id))
+                .is_none()
+        );
+
+        // Hover again, then leave the window entirely: state resets immediately too.
+        let _ = run_frame(3.0, Some(rect.center()));
+        assert!(
+            context
+                .data(|data| data.get_temp::<HoverSlideshowState>(preview_id))
+                .is_some()
+        );
+        let _ = run_frame(3.2, None);
+        assert!(
+            context
+                .data(|data| data.get_temp::<HoverSlideshowState>(preview_id))
+                .is_none()
+        );
     }
 }

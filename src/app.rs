@@ -835,7 +835,7 @@ impl eframe::App for App {
                                         grid_generation: self.workshop.grid_generation,
                                         subscribed_generation: self.workshop.subscribed_generation,
                                         detail: self.workshop.detail.as_ref(),
-                                        detail_image: self.workshop.detail_image,
+                                        detail_image: self.workshop.detail_image.as_ref(),
                                     },
                                 );
                             }
@@ -896,8 +896,8 @@ impl eframe::App for App {
                 self.workshop.detail = None;
                 self.workshop.detail_image = None;
             }
-            Some(WorkshopAction::ShowImage(index)) => {
-                self.workshop.detail_image = Some(index);
+            Some(WorkshopAction::ShowImage(viewer)) => {
+                self.workshop.detail_image = Some(viewer);
             }
             Some(WorkshopAction::CloseImage) => {
                 self.workshop.detail_image = None;

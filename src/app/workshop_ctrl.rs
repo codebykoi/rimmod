@@ -10,7 +10,7 @@ use crate::services::workshop::{
     self, InstallOutcome, SubscribedSort, SubscriptionSnapshot, WorkshopItem, WorkshopPage,
     WorkshopQuery, WorkshopSort,
 };
-use crate::ui::workshop::{WorkshopLoadStatus, WorkshopTab};
+use crate::ui::workshop::{WorkshopImageViewer, WorkshopLoadStatus, WorkshopTab};
 
 use super::App;
 
@@ -84,8 +84,9 @@ pub(super) struct WorkshopState {
     subscription_change_receiver: Receiver<SubscriptionTask>,
     pub(super) pending_subscriptions: HashSet<u64>,
     pub(super) detail: Option<WorkshopItem>,
-    /// Index into `detail.images` while the in-app image viewer is open.
-    pub(super) detail_image: Option<usize>,
+    /// Active image in the in-app lightbox (either a preview gallery index or
+    /// a standalone description image URL).
+    pub(super) detail_image: Option<WorkshopImageViewer>,
     pub(super) pending_search: bool,
     pub(super) grid_generation: u64,
     pub(super) subscribed_generation: u64,

@@ -52,6 +52,20 @@ fn query_input_combines_version_and_dlc_filters() {
     assert_eq!(input["requiredtags"][1], "Biotech");
     assert_eq!(input["match_all_tags"], true);
     assert_eq!(input["search_text"], "");
+    assert_eq!(input["return_previews"], true);
+}
+
+#[test]
+fn user_files_and_details_requests_include_additional_previews() {
+    let user_input = user_files_input(76_561_198_000_000_000, 1);
+    assert_eq!(user_input["return_previews"], true);
+
+    let details_params = details_query_params("secret", &[100, 200]);
+    assert!(details_params.contains(&("includeadditionalpreviews".to_owned(), "true".to_owned())));
+    assert!(details_params.contains(&("includetags".to_owned(), "true".to_owned())));
+    assert!(details_params.contains(&("includevotes".to_owned(), "true".to_owned())));
+    assert!(details_params.contains(&("publishedfileids[0]".to_owned(), "100".to_owned())));
+    assert!(details_params.contains(&("publishedfileids[1]".to_owned(), "200".to_owned())));
 }
 
 #[test]
@@ -341,43 +355,266 @@ fn loginusers_with_one_account_returns_it() {
 }
 
 #[test]
-fn description_images_are_extracted_for_the_gallery() {
-    let description = "Gallery:\n\
-        [img]https://i.imgur.com/a.png[/img]\n\
-        [IMG]//i.imgur.com/b.jpg[/IMG]\n\
-        [img]https://i.imgur.com/a.png[/img]\n\
-        [img]not-a-url[/img]\n\
-        [url=https://example.com]a link[/url]";
+fn item_images_come_from_previews_not_description() {
+    let json = r#"
+        {
+            "publishedfileid": "123",
+            "title": "Vanilla Vehicles Expanded - Tier 3",
+            "file_description": "[img]https://example.com/patreon-banner.png[/img]",
+            "preview_url": "https://example.com/cover.png",
+            "previews": [
+                {
+                    "previewid": "3",
+                    "sortorder": 20,
+                    "url": "//steamuserimages-a.akamaihd.net/ugc/second.jpg",
+                    "preview_type": 0
+                },
+                {
+                    "previewid": "2",
+                    "sortorder": 15,
+                    "youtubevideoid": "dQw4w9WgXcQ",
+                    "preview_type": 1
+                },
+                {
+                    "previewid": "1",
+                    "sortorder": "10",
+                    "url": "https://steamuserimages-a.akamaihd.net/ugc/first.jpg",
+                    "preview_type": 0
+                },
+                {
+                    "previewid": "4",
+                    "sortorder": 30,
+                    "url": "https://steamuserimages-a.akamaihd.net/ugc/first.jpg",
+                    "preview_type": 0
+                },
+                {
+                    "previewid": "5",
+                    "sortorder": 40,
+                    "url": "not-a-url",
+                    "preview_type": 0
+                }
+            ]
+        }
+    "#;
+
+    let details: PublishedFileDetails = serde_json::from_str(json).expect("valid details");
+    let item = details.into_item().expect("item");
 
     assert_eq!(
-        extract_image_urls(description),
-        ["https://i.imgur.com/a.png", "https://i.imgur.com/b.jpg"]
+        item.images,
+        [
+            "https://steamuserimages-a.akamaihd.net/ugc/first.jpg",
+            "https://steamuserimages-a.akamaihd.net/ugc/second.jpg",
+        ]
     );
 }
 
 #[test]
-fn image_gallery_stops_after_twelve_entries() {
-    let description = (0..20)
-        .map(|index| format!("[img]https://example.com/{index}.png[/img]"))
-        .collect::<String>();
+fn preview_slideshow_starts_with_cover_and_deduplicates_previews() {
+    let mut item = sample_item();
+    item.preview_url = Some("https://example.com/cover.png".to_owned());
+    item.images = vec![
+        "https://example.com/cover.png".to_owned(),
+        "https://example.com/shot1.png".to_owned(),
+        "https://example.com/shot2.png".to_owned(),
+    ];
 
-    assert_eq!(extract_image_urls(&description).len(), 12);
+    assert_eq!(
+        item.preview_slideshow_urls(),
+        [
+            "https://example.com/cover.png",
+            "https://example.com/shot1.png",
+            "https://example.com/shot2.png",
+        ]
+    );
+
+    item.preview_url = None;
+    assert_eq!(
+        item.preview_slideshow_urls(),
+        [
+            "https://example.com/cover.png",
+            "https://example.com/shot1.png",
+            "https://example.com/shot2.png",
+        ]
+    );
 }
 
 #[test]
-fn bbcode_is_stripped_but_unknown_tags_are_kept() {
-    let description = "[b]Bold[/b] and [url=https://example.com]a link[/url]\n\
-                       [list]\n[*]one\n[/list]\n\
-                       [img]https://example.com/image.png[/img]\n\
-                       [color=red]red[/color]";
+fn bbcode_parses_headings_styles_links_lists_and_keeps_unknown_tags() {
+    let description = "[h1]Introduction[/h1]\n\
+        [b]DMS2[/b] and [url=https://example.com]a link[/url] with [color=red]red[/color]\n\
+        [list]\n\
+        [*][b]Harmony[/b]\n\
+        [*]Biotech DLC[/*]\n\
+        [/list]\n\
+        [noparse][b]literal[/b][/noparse]";
 
-    let stripped = strip_bbcode(description);
+    let blocks = bbcode::parse_bbcode(description);
 
-    assert!(stripped.contains("Bold and a link"));
-    assert!(stripped.contains("• one"));
-    assert!(!stripped.contains("[url"));
-    assert!(!stripped.contains("image.png"));
-    assert!(stripped.contains("[color=red]red[/color]"));
+    assert_eq!(
+        blocks,
+        vec![
+            bbcode::DescriptionBlock::Heading {
+                level: 1,
+                spans: vec![bbcode::DescriptionSpan {
+                    text: "Introduction".to_owned(),
+                    style: bbcode::SpanStyle::default(),
+                    link: None,
+                }],
+            },
+            bbcode::DescriptionBlock::Paragraph(vec![
+                bbcode::DescriptionSpan {
+                    text: "DMS2".to_owned(),
+                    style: bbcode::SpanStyle {
+                        bold: true,
+                        ..Default::default()
+                    },
+                    link: None,
+                },
+                bbcode::DescriptionSpan {
+                    text: " and ".to_owned(),
+                    style: bbcode::SpanStyle::default(),
+                    link: None,
+                },
+                bbcode::DescriptionSpan {
+                    text: "a link".to_owned(),
+                    style: bbcode::SpanStyle::default(),
+                    link: Some("https://example.com".to_owned()),
+                },
+                bbcode::DescriptionSpan {
+                    text: " with [color=red]red[/color]".to_owned(),
+                    style: bbcode::SpanStyle::default(),
+                    link: None,
+                },
+            ]),
+            bbcode::DescriptionBlock::List {
+                ordered: false,
+                items: vec![
+                    vec![bbcode::DescriptionBlock::Paragraph(vec![
+                        bbcode::DescriptionSpan {
+                            text: "Harmony".to_owned(),
+                            style: bbcode::SpanStyle {
+                                bold: true,
+                                ..Default::default()
+                            },
+                            link: None,
+                        },
+                    ])],
+                    vec![bbcode::DescriptionBlock::Paragraph(vec![
+                        bbcode::DescriptionSpan {
+                            text: "Biotech DLC".to_owned(),
+                            style: bbcode::SpanStyle::default(),
+                            link: None,
+                        },
+                    ])],
+                ],
+            },
+            bbcode::DescriptionBlock::Paragraph(vec![bbcode::DescriptionSpan {
+                text: "[b]literal[/b]".to_owned(),
+                style: bbcode::SpanStyle::default(),
+                link: None,
+            }]),
+        ]
+    );
+}
+
+#[test]
+fn bbcode_parses_linked_images_image_rows_and_tables() {
+    let description = "[url=https://steamcommunity.com/id/author][img]https://example.com/banner.png[/img][/url]\n\
+        [img]//example.com/card1.png[/img] [img]https://example.com/card2.png[/img]\n\
+        [table noborder=1]\n\
+        [tr]\n\
+        [td][img]https://example.com/left.png[/img][/td]\n\
+        [td][img]https://example.com/right1.png[/img]\n\
+        [img]https://example.com/right2.png[/img][/td]\n\
+        [/tr]\n\
+        [/table]";
+
+    let blocks = bbcode::parse_bbcode(description);
+
+    assert_eq!(
+        blocks,
+        vec![
+            bbcode::DescriptionBlock::ImageRow(vec![bbcode::DescriptionImage {
+                url: "https://example.com/banner.png".to_owned(),
+                link: Some("https://steamcommunity.com/id/author".to_owned()),
+            }]),
+            bbcode::DescriptionBlock::ImageRow(vec![
+                bbcode::DescriptionImage {
+                    url: "https://example.com/card1.png".to_owned(),
+                    link: None,
+                },
+                bbcode::DescriptionImage {
+                    url: "https://example.com/card2.png".to_owned(),
+                    link: None,
+                },
+            ]),
+            bbcode::DescriptionBlock::Table {
+                bordered: false,
+                rows: vec![vec![
+                    bbcode::TableCell {
+                        header: false,
+                        blocks: vec![bbcode::DescriptionBlock::ImageRow(vec![
+                            bbcode::DescriptionImage {
+                                url: "https://example.com/left.png".to_owned(),
+                                link: None,
+                            },
+                        ])],
+                    },
+                    bbcode::TableCell {
+                        header: false,
+                        blocks: vec![
+                            bbcode::DescriptionBlock::ImageRow(vec![bbcode::DescriptionImage {
+                                url: "https://example.com/right1.png".to_owned(),
+                                link: None,
+                            }]),
+                            bbcode::DescriptionBlock::ImageRow(vec![bbcode::DescriptionImage {
+                                url: "https://example.com/right2.png".to_owned(),
+                                link: None,
+                            }]),
+                        ],
+                    },
+                ]],
+            },
+        ]
+    );
+}
+
+#[test]
+fn bbcode_parses_quotes_code_dividers_youtube_and_bare_urls() {
+    let description = "[quote=Oskar]Mod details[/quote]\n\
+        [hr][/hr]\n\
+        [code]let x = [b]raw[/b];[/code]\n\
+        [previewyoutube=dQw4w9WgXcQ;full][/previewyoutube]\n\
+        [url]www.patreon.com/author[/url]";
+
+    let blocks = bbcode::parse_bbcode(description);
+
+    assert_eq!(
+        blocks,
+        vec![
+            bbcode::DescriptionBlock::Quote {
+                author: Some("Oskar".to_owned()),
+                blocks: vec![bbcode::DescriptionBlock::Paragraph(vec![
+                    bbcode::DescriptionSpan {
+                        text: "Mod details".to_owned(),
+                        style: bbcode::SpanStyle::default(),
+                        link: None,
+                    },
+                ])],
+            },
+            bbcode::DescriptionBlock::Divider,
+            bbcode::DescriptionBlock::Code("let x = [b]raw[/b];".to_owned()),
+            bbcode::DescriptionBlock::YouTube {
+                video_id: "dQw4w9WgXcQ".to_owned(),
+            },
+            bbcode::DescriptionBlock::Paragraph(vec![bbcode::DescriptionSpan {
+                text: "www.patreon.com/author".to_owned(),
+                style: bbcode::SpanStyle::default(),
+                link: Some("https://www.patreon.com/author".to_owned()),
+            }]),
+        ]
+    );
 }
 
 #[test]

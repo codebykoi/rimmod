@@ -7,12 +7,15 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+pub(crate) mod bbcode;
+
 use crate::models::major_minor_version;
 
 pub(crate) const RIMWORLD_APP_ID: u32 = 294_100;
 const QUERY_FILES_URL: &str = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/";
 const GET_USER_FILES_URL: &str =
     "https://api.steampowered.com/IPublishedFileService/GetUserFiles/v1/";
+const GET_DETAILS_URL: &str = "https://api.steampowered.com/IPublishedFileService/GetDetails/v1/";
 const PUBLISHED_FILE_DETAILS_URL: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 const SUBSCRIBE_URL: &str = "https://api.steampowered.com/IPublishedFileService/Subscribe/v1/";
@@ -117,7 +120,7 @@ pub(crate) struct WorkshopItem {
     pub(crate) title: String,
     pub(crate) description: String,
     pub(crate) preview_url: Option<String>,
-    /// Additional image URLs embedded in the description.
+    /// Additional preview image URLs returned by Steam for this item.
     pub(crate) images: Vec<String>,
     pub(crate) author_steam_id: Option<u64>,
     pub(crate) author: Option<String>,
@@ -170,6 +173,26 @@ impl WorkshopItem {
         self.supported_versions
             .iter()
             .any(|version| major_minor_version(version) == Some(game_version))
+    }
+
+    /// Preview images in slideshow order: the cover thumbnail first, followed
+    /// by Steam's additional preview screenshots without duplicates.
+    pub(crate) fn preview_slideshow_urls(&self) -> Vec<&str> {
+        let mut urls =
+            Vec::with_capacity(self.images.len() + usize::from(self.preview_url.is_some()));
+
+        if let Some(preview_url) = self.preview_url.as_deref() {
+            urls.push(preview_url);
+        }
+
+        for image in &self.images {
+            let url = image.as_str();
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+
+        urls
     }
 }
 
@@ -253,6 +276,8 @@ struct PublishedFileDetails {
     vote_data: Option<VoteData>,
     #[serde(default)]
     tags: Vec<SteamTag>,
+    #[serde(default)]
+    previews: Vec<SteamPreview>,
 }
 
 impl PublishedFileDetails {
@@ -271,7 +296,7 @@ impl PublishedFileDetails {
             .collect();
         let supported_versions = extract_supported_versions(&tags);
         let vote_data = self.vote_data.unwrap_or_default();
-        let images = extract_image_urls(&self.description);
+        let images = extract_preview_image_urls(&self.previews);
 
         Some(WorkshopItem {
             published_file_id,
@@ -315,6 +340,16 @@ impl VoteData {
 struct SteamTag {
     #[serde(default)]
     tag: String,
+}
+
+#[derive(Deserialize)]
+struct SteamPreview {
+    #[serde(default)]
+    url: String,
+    #[serde(default, deserialize_with = "deserialize_optional_string_number")]
+    sortorder: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_number")]
+    preview_type: Option<u64>,
 }
 
 /// RimWorld's uploader tags items with their supported versions as plain
@@ -397,7 +432,7 @@ fn query_input(query: &WorkshopQuery) -> serde_json::Value {
         "return_vote_data": true,
         "return_tags": true,
         "return_kv_tags": false,
-        "return_previews": false,
+        "return_previews": true,
         "return_children": false,
         "return_short_description": false,
         "return_for_sale_data": false,
@@ -443,38 +478,32 @@ pub(crate) fn query_workshop(api_key: &str, query: &WorkshopQuery) -> Result<Wor
     })
 }
 
-/// Fetch full item details by ID. The legacy `GetPublishedFileDetails`
-/// endpoint works without an API key, so the Subscribed tab still works when
-/// only the local Steam workshop manifest is available.
-pub(crate) fn fetch_items_by_ids(
+fn details_query_params(api_key: &str, ids: &[u64]) -> Vec<(String, String)> {
+    let mut params = Vec::with_capacity(ids.len() + 4);
+    params.push(("key".to_owned(), api_key.to_owned()));
+    params.push(("includetags".to_owned(), "true".to_owned()));
+    params.push(("includeadditionalpreviews".to_owned(), "true".to_owned()));
+    params.push(("includevotes".to_owned(), "true".to_owned()));
+
+    for (index, id) in ids.iter().enumerate() {
+        params.push((format!("publishedfileids[{index}]"), id.to_string()));
+    }
+
+    params
+}
+
+fn fetch_items_by_ids_with_key(
+    client: &reqwest::blocking::Client,
+    api_key: &str,
     ids: &[u64],
-    api_key: Option<&str>,
 ) -> Result<Vec<WorkshopItem>, String> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
+    let mut items = Vec::with_capacity(ids.len());
 
-    let mut unique_ids = Vec::with_capacity(ids.len());
-    for &id in ids {
-        if !unique_ids.contains(&id) {
-            unique_ids.push(id);
-        }
-    }
-
-    let client = http_client()?;
-    let mut items = Vec::with_capacity(unique_ids.len());
-
-    for chunk in unique_ids.chunks(100) {
-        let mut form: Vec<(String, String)> = Vec::with_capacity(chunk.len() + 1);
-        form.push(("itemcount".to_owned(), chunk.len().to_string()));
-
-        for (index, id) in chunk.iter().enumerate() {
-            form.push((format!("publishedfileids[{index}]"), id.to_string()));
-        }
-
+    for chunk in ids.chunks(50) {
+        let params = details_query_params(api_key, chunk);
         let response = client
-            .post(PUBLISHED_FILE_DETAILS_URL)
-            .form(&form)
+            .get(GET_DETAILS_URL)
+            .query(&params)
             .send()
             .map_err(|error| format!("Steam API request failed: {error}"))?;
 
@@ -496,11 +525,92 @@ pub(crate) fn fetch_items_by_ids(
         );
     }
 
-    if let Some(api_key) = api_key {
+    Ok(items)
+}
+
+/// Fetch full item details by ID. Uses `IPublishedFileService/GetDetails` when
+/// an API key is available (so additional previews and vote data are included),
+/// and falls back to the keyless `GetPublishedFileDetails` endpoint otherwise.
+pub(crate) fn fetch_items_by_ids(
+    ids: &[u64],
+    api_key: Option<&str>,
+) -> Result<Vec<WorkshopItem>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut unique_ids = Vec::with_capacity(ids.len());
+    for &id in ids {
+        if !unique_ids.contains(&id) {
+            unique_ids.push(id);
+        }
+    }
+
+    let client = http_client()?;
+    let trimmed_key = api_key.map(str::trim).filter(|key| !key.is_empty());
+
+    let mut items = if let Some(api_key) = trimmed_key
+        && let Ok(items) = fetch_items_by_ids_with_key(&client, api_key, &unique_ids)
+    {
+        items
+    } else {
+        let mut items = Vec::with_capacity(unique_ids.len());
+
+        for chunk in unique_ids.chunks(100) {
+            let mut form: Vec<(String, String)> = Vec::with_capacity(chunk.len() + 1);
+            form.push(("itemcount".to_owned(), chunk.len().to_string()));
+
+            for (index, id) in chunk.iter().enumerate() {
+                form.push((format!("publishedfileids[{index}]"), id.to_string()));
+            }
+
+            let response = client
+                .post(PUBLISHED_FILE_DETAILS_URL)
+                .form(&form)
+                .send()
+                .map_err(|error| format!("Steam API request failed: {error}"))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(steam_status_error("item details", status));
+            }
+
+            let envelope = response
+                .json::<FileDetailsEnvelope>()
+                .map_err(|error| format!("Steam API returned an unexpected response: {error}"))?;
+
+            items.extend(
+                envelope
+                    .response
+                    .publishedfiledetails
+                    .into_iter()
+                    .filter_map(PublishedFileDetails::into_item),
+            );
+        }
+
+        items
+    };
+
+    if let Some(api_key) = trimmed_key {
         attach_author_names(api_key, &mut items);
     }
 
     Ok(items)
+}
+
+fn user_files_input(steamid: u64, page: u32) -> serde_json::Value {
+    serde_json::json!({
+        "steamid": steamid.to_string(),
+        "appid": RIMWORLD_APP_ID,
+        "page": page,
+        "numperpage": 100,
+        "type": "mysubscriptions",
+        "return_vote_data": true,
+        "return_tags": true,
+        "return_previews": true,
+        "return_short_description": false,
+        "cache_max_age_seconds": 300
+    })
 }
 
 /// Fetch every item the signed-in account is subscribed to. The Web API key
@@ -521,17 +631,7 @@ pub(crate) fn fetch_subscribed_items(
 
     // 50 pages of 100 items is a safety cap far above normal RimWorld use.
     while page <= 50 && (items.len() as u64) < total {
-        let input = serde_json::json!({
-            "steamid": steamid.to_string(),
-            "appid": RIMWORLD_APP_ID,
-            "page": page,
-            "numperpage": 100,
-            "type": "mysubscriptions",
-            "return_vote_data": true,
-            "return_tags": true,
-            "return_short_description": false,
-            "cache_max_age_seconds": 300
-        });
+        let input = user_files_input(steamid, page);
 
         let response = client
             .get(GET_USER_FILES_URL)
@@ -971,138 +1071,33 @@ fn quoted_values(line: &str) -> Vec<&str> {
     values
 }
 
-/// Collect image URLs that authors embed in Workshop descriptions with
-/// `[img]...[/img]`. These are the screenshots shown on the item page.
-pub(crate) fn extract_image_urls(description: &str) -> Vec<String> {
-    const MAX_IMAGES: usize = 12;
+const STEAM_PREVIEW_TYPE_IMAGE: u64 = 0;
 
-    let lowercase = description.to_ascii_lowercase();
-    let mut urls = Vec::new();
-    let mut search_start = 0;
+/// Collect image URLs from Steam's item `previews` array in author-defined
+/// display order, skipping non-image entries such as YouTube videos.
+fn extract_preview_image_urls(previews: &[SteamPreview]) -> Vec<String> {
+    let mut entries: Vec<(u64, usize, String)> = previews
+        .iter()
+        .enumerate()
+        .filter(|(_, preview)| {
+            preview.preview_type.unwrap_or(STEAM_PREVIEW_TYPE_IMAGE) == STEAM_PREVIEW_TYPE_IMAGE
+        })
+        .filter_map(|(index, preview)| {
+            let url = bbcode::normalize_image_url(&preview.url)?;
+            Some((preview.sortorder.unwrap_or(u64::MAX), index, url))
+        })
+        .collect();
 
-    while urls.len() < MAX_IMAGES {
-        let Some(open_offset) = lowercase[search_start..].find("[img]") else {
-            break;
-        };
+    entries.sort_by_key(|(sort_order, index, _)| (*sort_order, *index));
 
-        let content_start = search_start + open_offset + "[img]".len();
-        let Some(close_offset) = lowercase[content_start..].find("[/img]") else {
-            break;
-        };
-
-        let content_end = content_start + close_offset;
-        let url = description[content_start..content_end].trim();
-
-        if let Some(url) = normalize_image_url(url)
-            && !urls.contains(&url)
-        {
+    let mut urls = Vec::with_capacity(entries.len());
+    for (_, _, url) in entries {
+        if !urls.contains(&url) {
             urls.push(url);
         }
-
-        search_start = content_end + "[/img]".len();
     }
 
     urls
-}
-
-fn normalize_image_url(url: &str) -> Option<String> {
-    let url = url.trim();
-
-    if url.starts_with("https://") || url.starts_with("http://") {
-        Some(url.to_owned())
-    } else {
-        url.strip_prefix("//").map(|rest| format!("https://{rest}"))
-    }
-}
-
-/// Steam descriptions use BBCode. RimMod renders plain text, so formatting
-/// tags are removed while links keep their readable label.
-pub(crate) fn strip_bbcode(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text;
-
-    while let Some(open) = rest.find('[') {
-        output.push_str(&rest[..open]);
-
-        let Some(close) = rest[open..].find(']').map(|close| open + close) else {
-            output.push_str(&rest[open..]);
-            return output;
-        };
-
-        let tag = &rest[open + 1..close];
-        let lowercase = tag.to_ascii_lowercase();
-
-        if lowercase == "img" {
-            // Drop embedded images entirely: their URLs are noise in plain text.
-            if let Some(end) = rest[close + 1..]
-                .to_ascii_lowercase()
-                .find("[/img]")
-                .map(|end| close + 1 + end)
-            {
-                rest = &rest[end + "[/img]".len()..];
-                continue;
-            }
-        }
-
-        if lowercase == "*" {
-            output.push_str("• ");
-        } else if !is_known_bbcode_tag(&lowercase) {
-            // Leave unknown tags alone instead of mangling mod descriptions.
-            output.push_str(&rest[open..=close]);
-        }
-
-        rest = &rest[close + 1..];
-    }
-
-    output.push_str(rest);
-
-    let mut collapsed = String::with_capacity(output.len());
-    let mut blank_lines = 0;
-
-    for line in output.lines() {
-        if line.trim().is_empty() {
-            blank_lines += 1;
-            if blank_lines <= 1 {
-                collapsed.push('\n');
-            }
-        } else {
-            blank_lines = 0;
-            collapsed.push_str(line.trim_end());
-            collapsed.push('\n');
-        }
-    }
-
-    collapsed.trim().to_owned()
-}
-
-fn is_known_bbcode_tag(tag: &str) -> bool {
-    let tag = tag.trim_start_matches('/');
-    let name = tag.split('=').next().unwrap_or(tag);
-
-    matches!(
-        name,
-        "b" | "i"
-            | "u"
-            | "s"
-            | "h1"
-            | "h2"
-            | "h3"
-            | "list"
-            | "olist"
-            | "url"
-            | "quote"
-            | "code"
-            | "noparse"
-            | "spoiler"
-            | "hr"
-            | "p"
-            | "table"
-            | "tr"
-            | "td"
-            | "th"
-            | "img"
-            | "previewyoutube"
-    )
 }
 
 pub(crate) fn format_count(value: u64) -> String {
